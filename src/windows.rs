@@ -1,65 +1,72 @@
-use std::{cell::Cell, mem::size_of, ptr::null_mut};
+use crate::{
+    diagnostic::WindowId,
+    ime::{self, Completion, Request},
+    logic::{Decision, F1State, Pending},
+    model,
+};
+use std::{
+    cell::{Cell, RefCell},
+    mem::size_of,
+    ptr::null_mut,
+    sync::{
+        atomic::Ordering,
+        mpsc::{self, Receiver, SyncSender},
+    },
+};
 use windows_sys::Win32::{
     Foundation::*,
-    System::{LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount, Threading::*},
+    System::{LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount},
     UI::{Accessibility::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
-
-use crate::logic::{allowed_image, Decision, F1State, PendingSend, ENTER_DELAY_MS};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SEND: u32 = WM_APP + 2;
 const WM_REFRESH: u32 = WM_APP + 3;
 const TOGGLE: u32 = 1;
 const EXIT: u32 = 2;
-const TIMER: usize = 1;
-const INPUT_TAG: usize = 0x49524953;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Target {
-    window: HWND,
-    process: u32,
-    thread: u32,
-}
+const REFRESH: usize = 1;
+const POLL: usize = 2;
 
 #[derive(Clone, Copy)]
 struct State {
     window: HWND,
     enabled: bool,
-    target: Option<Target>,
-    pending: PendingSend<Target>,
+    target: Option<WindowId>,
+    pending: Pending<Request>,
+    timed_out: bool,
     f1: F1State,
     taskbar_created: u32,
+    closing_at: Option<u32>,
+    finishing: bool,
+    notifying: bool,
 }
-
+struct Worker {
+    requests: SyncSender<Request>,
+    replies: Receiver<Completion>,
+}
 thread_local! {
-    // コールバックはすべて登録した UI スレッドで実行される。
     static STATE: Cell<State> = const { Cell::new(State {
-        window: null_mut(),
-        enabled: true,
-        target: None,
-        pending: PendingSend::EMPTY,
-        f1: F1State::EMPTY,
-        taskbar_created: 0,
+        window: null_mut(), enabled: true, target: None, pending: Pending::EMPTY,
+        timed_out: false, f1: F1State::EMPTY, taskbar_created: 0,
+        closing_at: None, finishing: false, notifying: false,
     }) };
+    static WORKER: RefCell<Option<Worker>> = const { RefCell::new(None) };
 }
 
-/// Win32 用の終端付き UTF-16 文字列を作る。
+/// Win32 用の終端付き文字列を作る。
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
 /// コールバック中に借用を保持せず状態を更新する。
 fn update<R>(change: impl FnOnce(&mut State) -> R) -> R {
-    STATE.with(|cell| {
-        let mut state = cell.get();
-        let result = change(&mut state);
-        cell.set(state);
-        result
-    })
+    let mut state = STATE.get();
+    let result = change(&mut state);
+    STATE.set(state);
+    result
 }
 
-/// 起動時や送信失敗時のエラーだけを表示する。
+/// 初期化または入力・復元を確認できない理由を表示する。
 fn error(text: &str) {
     unsafe {
         MessageBoxW(
@@ -71,133 +78,111 @@ fn error(text: &str) {
     }
 }
 
-/// 現在の前面ウィンドウと所属プロセスを取得する。
-fn foreground() -> Option<Target> {
-    unsafe {
-        let window = GetForegroundWindow();
-        let mut process = 0;
-        let thread = GetWindowThreadProcessId(window, &mut process);
-        if window.is_null() || process == 0 || thread == 0 {
-            None
-        } else {
-            Some(Target {
-                window,
-                process,
-                thread,
-            })
-        }
-    }
+/// 無効化と表示を一緒に行い、通知中に再開させない。
+fn report_error(text: &str) {
+    ime::STOP.store(true, Ordering::SeqCst);
+    update(|s| {
+        s.enabled = false;
+        s.notifying = true;
+    });
+    tray(NIM_MODIFY);
+    error(text);
+    update(|s| s.notifying = false);
 }
 
-/// プロセス照会はフックの外で行い、失敗した場合は対象にしない。
-fn is_allowed(target: Target) -> bool {
-    unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, target.process);
-        if process.is_null() {
-            return false;
-        }
-
-        let mut path = [0u16; 32768];
-        let mut length = path.len() as u32;
-        let ok = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length);
-        CloseHandle(process);
-
-        ok != 0 && String::from_utf16(&path[..length as usize]).is_ok_and(|s| allowed_image(&s))
-    }
-}
-
-/// 前面が変わった場合は待機中の送信を捨て、対象を更新する。
+/// プロセス名の照会はフック外で行い、候補が変われば現在の処理を失効させる。
 fn refresh() {
-    let current = foreground();
-    let target = current.filter(|&target| is_allowed(target));
-    let target = target.filter(|_| foreground() == current);
+    let current = ime::foreground();
+    let target = current
+        .filter(|&w| ime::is_allowed(w))
+        .filter(|_| ime::foreground() == current);
     if STATE.get().target != target {
-        cancel_pending();
+        ime::EPOCH.fetch_add(1, Ordering::SeqCst);
     }
-    update(|state| state.target = target);
+    update(|s| s.target = target);
 }
 
-/// Shift、Ctrl、Alt、Windows キーの押下を確認する。
+/// 修飾キーの押下を確認する。
 fn modifiers_down() -> bool {
     [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
         .iter()
-        .any(|&key| unsafe { GetAsyncKeyState(key as i32) < 0 })
+        .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } < 0)
 }
 
-/// 前面変更通知では候補を無効化し、名前照会をメッセージへ回す。
-unsafe extern "system" fn foreground_event(
-    _hook: HWINEVENTHOOK,
-    _event: u32,
-    _window: HWND,
-    _object: i32,
-    _child: i32,
-    _thread: u32,
-    _time: u32,
+/// 前面・フォーカス変更を失効として記録し、名前照会は後で行う。
+unsafe extern "system" fn focus_event(
+    _: HWINEVENTHOOK,
+    event: u32,
+    _: HWND,
+    _: i32,
+    _: i32,
+    _: u32,
+    _: u32,
 ) {
-    cancel_pending();
-    update(|state| state.target = None);
-    PostMessageW(STATE.get().window, WM_REFRESH, 0, 0);
+    ime::EPOCH.fetch_add(1, Ordering::SeqCst);
+    if event == EVENT_SYSTEM_FOREGROUND {
+        update(|s| s.target = None);
+        PostMessageW(STATE.get().window, WM_REFRESH, 0, 0);
+    }
 }
 
-/// フックは物理 F1 の判定と送信予約だけを行う。
+/// マウス操作の内容は保存せず、介入だけを記録する。
+unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        ime::EPOCH.fetch_add(1, Ordering::SeqCst);
+    }
+    CallNextHookEx(null_mut(), code, wparam, lparam)
+}
+
+/// 物理 F1 の対象判定だけを行い、IME 処理・待機をフック内で行わない。
 unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION as i32 {
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
-
     let key = &*(lparam as *const KBDLLHOOKSTRUCT);
-    if key.flags & LLKHF_INJECTED != 0 {
+    let injected = key.flags & LLKHF_INJECTED != 0;
+    if model::own_input(injected, key.dwExtraInfo, ime::input_tag()) {
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
-
+    if injected || key.vkCode != VK_F1 as u32 {
+        ime::EPOCH.fetch_add(1, Ordering::SeqCst);
+        return CallNextHookEx(null_mut(), code, wparam, lparam);
+    }
     let down = match wparam as u32 {
         WM_KEYDOWN | WM_SYSKEYDOWN => true,
         WM_KEYUP | WM_SYSKEYUP => false,
         _ => return CallNextHookEx(null_mut(), code, wparam, lparam),
     };
-    // 待機中に押した修飾キーは、Enter までに離されても予約を取り消す。
-    if down
-        && [
-            VK_SHIFT,
-            VK_LSHIFT,
-            VK_RSHIFT,
-            VK_CONTROL,
-            VK_LCONTROL,
-            VK_RCONTROL,
-            VK_MENU,
-            VK_LMENU,
-            VK_RMENU,
-            VK_LWIN,
-            VK_RWIN,
-        ]
-        .contains(&(key.vkCode as u16))
-    {
-        cancel_pending();
-    }
-    if key.vkCode != VK_F1 as u32 {
-        return CallNextHookEx(null_mut(), code, wparam, lparam);
-    }
-
     let mut state = STATE.get();
-    let target = state.target.filter(|&target| foreground() == Some(target));
-    let eligible =
-        state.enabled && target.is_some() && !modifiers_down() && key.flags & LLKHF_ALTDOWN == 0;
+    let target = state.target.filter(|&w| ime::foreground() == Some(w));
+    let eligible = state.enabled
+        && state.closing_at.is_none()
+        && !state.finishing
+        && target.is_some()
+        && !modifiers_down()
+        && key.flags & LLKHF_ALTDOWN == 0;
     let decision = state.f1.event(down, eligible, false);
-
     if decision == Decision::Send {
-        // 待機中の対象 F1 は抑止だけ行い、予約を重ねない。
-        if let Some(id) = target.and_then(|target| state.pending.reserve(target, key.time)) {
-            if PostMessageW(state.window, WM_SEND, id, 0) == 0 {
-                state.pending.cancel();
-                state.f1 = F1State::default();
-                state.f1.event(true, false, false);
-                STATE.set(state);
-                return CallNextHookEx(null_mut(), code, wparam, lparam);
+        if let Some(target) = target {
+            // 対象 F1 の連打は抑止だけ行い、処理完了まで予約を重ねない。
+            if state.pending.current().is_none() {
+                let request = ime::capture(target, key.time);
+                if let Some(id) = state.pending.reserve(request) {
+                    state.timed_out = false;
+                    ime::ABORT.store(false, Ordering::SeqCst);
+                    ime::STOP.store(false, Ordering::SeqCst);
+                    if PostMessageW(state.window, WM_SEND, id, 0) == 0 {
+                        state.pending.finish(id);
+                        state.f1 = F1State::EMPTY;
+                        state.f1.event(true, false, false);
+                        STATE.set(state);
+                        return CallNextHookEx(null_mut(), code, wparam, lparam);
+                    }
+                }
             }
         }
     }
     STATE.set(state);
-
     if decision == Decision::Pass {
         CallNextHookEx(null_mut(), code, wparam, lparam)
     } else {
@@ -205,129 +190,101 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     }
 }
 
-/// Unicode 文字または仮想キーの入力イベントを作る。
-fn input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                wScan: scan,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: INPUT_TAG,
-            },
-        },
-    }
-}
-
-/// 保留とタイマーを取り消す。既に届いた通知は予約の識別子で拒否する。
-fn cancel_pending() {
-    let id = update(|state| state.pending.cancel());
-    if let Some(id) = id {
-        unsafe {
-            KillTimer(STATE.get().window, id);
-        }
-    }
-}
-
-/// 完了した予約だけを解放し、再入で作られた別の予約を残す。
-fn finish_pending(id: usize) {
-    update(|state| state.pending.finish(id));
-    unsafe {
-        KillTimer(STATE.get().window, id);
-    }
-}
-
-/// 送信直前の有効状態、修飾キーと元の前面アプリを確認する。
-fn ready(target: Target) -> bool {
-    is_allowed(target) && STATE.get().enabled && !modifiers_down() && foreground() == Some(target)
-}
-
-/// 入力の投入数を確認し、失敗時は保留を破棄して無効化する。
-fn send_inputs(events: &[INPUT]) -> bool {
-    let sent = unsafe {
-        SendInput(
-            events.len() as u32,
-            events.as_ptr(),
-            size_of::<INPUT>() as i32,
-        )
+/// 作業を一度だけ渡し、重複した古いメッセージは無視する。
+fn enqueue(id: usize) {
+    let Some(mut request) = update(|s| s.pending.start(id)) else {
+        return;
     };
-    if sent == events.len() as u32 {
-        return true;
+    request.snapshot.id = id;
+    let sent = WORKER.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|w| w.requests.try_send(request).is_ok())
+    });
+    if !sent {
+        update(|s| {
+            s.pending.finish(id);
+        });
+        report_error("入力処理を開始できないため Iris を無効にしました。送信していません。");
     }
+}
 
-    cancel_pending();
-    update(|state| state.enabled = false);
+/// 終了は新しい入力を止め、処理中なら条件付き復元の完了を有限時間待つ。
+fn request_exit() {
+    ime::STOP.store(true, Ordering::SeqCst);
+    update(|s| {
+        s.enabled = false;
+        s.closing_at
+            .get_or_insert_with(|| unsafe { GetTickCount() });
+    });
     tray(NIM_MODIFY);
-    error("入力の送信に失敗したため Iris を無効にしました。\n一部だけ入力された可能性があります。入力欄とキー状態を確認してください。自動再送はしません。");
-    false
-}
-
-/// 文字だけを送り、成功後にフック外で 100ms のタイマーを開始する。
-fn send_text(id: usize) {
-    let Some(target) = STATE.get().pending.target(id) else {
-        return;
-    };
-    let events = [
-        input(0, 'O' as u16, KEYEVENTF_UNICODE),
-        input(0, 'O' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
-        input(0, 'K' as u16, KEYEVENTF_UNICODE),
-        input(0, 'K' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
-    ];
-    let allowed = ready(target);
-    let now = unsafe { GetTickCount() };
-    if !update(|state| state.pending.begin_text(id, now, allowed)) {
-        return;
-    }
-    if !send_inputs(&events) {
-        return;
-    }
-
-    // SendInput 中の取消・再入で予約が変わっていれば Enter を予約しない。
-    let now = unsafe { GetTickCount() };
-    if !update(|state| state.pending.text_sent(id, now)) {
-        return;
-    }
-    let window = STATE.get().window;
-    if unsafe { SetTimer(window, id, ENTER_DELAY_MS, None) } == 0 {
-        cancel_pending();
-        update(|state| state.enabled = false);
-        tray(NIM_MODIFY);
-        error("Enter の待機に失敗したため Iris を無効にしました。入力欄の OK を確認してください。");
-    } else if STATE.get().pending.target(id).is_none() {
-        unsafe {
-            KillTimer(window, id);
-        }
+    if STATE.get().pending.current().is_none() {
+        finish_exit(false);
     }
 }
 
-/// タイマーの重複通知を拒否し、条件が保たれた場合だけ Enter を送る。
-fn send_enter(id: usize) {
-    let Some(target) = STATE.get().pending.target(id) else {
-        unsafe {
-            KillTimer(STATE.get().window, id);
-        }
+/// 終了通知への再入を防ぎ、未完了なら手動確認を知らせる。
+fn finish_exit(uncertain: bool) {
+    if update(|s| {
+        let old = s.finishing;
+        s.finishing = true;
+        old
+    }) {
         return;
-    };
-    let events = [input(VK_RETURN, 0, 0), input(VK_RETURN, 0, KEYEVENTF_KEYUP)];
-    let allowed = ready(target);
-    let now = unsafe { GetTickCount() };
-    if !update(|state| state.pending.begin_enter(id, now, allowed)) {
-        if STATE.get().pending.target(id).is_none() {
-            unsafe {
-                KillTimer(STATE.get().window, id);
+    }
+    ime::ABORT.store(true, Ordering::SeqCst);
+    unsafe {
+        KillTimer(STATE.get().window, POLL);
+        KillTimer(STATE.get().window, REFRESH);
+    }
+    if uncertain {
+        error("処理完了・IME 復元を確認できません。入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。");
+    }
+    unsafe {
+        PostQuitMessage(0);
+    }
+}
+
+/// 完了通知だけで予約を解放し、期限切れでも未完了の処理を再利用しない。
+fn poll() {
+    let replies: Vec<_> = WORKER.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|w| w.replies.try_iter().collect())
+            .unwrap_or_default()
+    });
+    for result in replies {
+        if update(|s| s.pending.finish(result.id)) {
+            let warning = result.warning.or(if STATE.get().timed_out {
+                Some("処理が期限を超えたため Iris を無効にしました。入力・送信結果、キー状態、IME を手動確認してください。")
+            } else { None });
+            if let Some(warning) = warning {
+                report_error(warning);
             }
         }
-        return;
     }
-
-    // SendInput 中も予約を保持して二重送信を防ぐ。送信先切替の競合は残る。
-    unsafe {
-        KillTimer(STATE.get().window, id);
+    let state = STATE.get();
+    if let Some((_, request)) = state.pending.current() {
+        if !state.timed_out && ime::expired(request) {
+            ime::ABORT.store(true, Ordering::SeqCst);
+            ime::STOP.store(true, Ordering::SeqCst);
+            update(|s| {
+                s.timed_out = true;
+                s.enabled = false;
+            });
+            tray(NIM_MODIFY);
+            notify_timeout();
+            // 別スレッドが戻る前にはモーダル表示でフォーカスを動かさない。
+        }
     }
-    send_inputs(&events);
-    finish_pending(id);
+    let state = STATE.get();
+    if let Some(at) = state.closing_at {
+        if state.pending.current().is_none() {
+            finish_exit(false);
+        } else if unsafe { GetTickCount() }.wrapping_sub(at) >= 1000 {
+            finish_exit(true);
+        }
+    }
 }
 
 /// 通知領域アイコンの状態を登録・更新・削除する。
@@ -342,7 +299,9 @@ fn tray(action: u32) -> bool {
         hIcon: unsafe { LoadIconW(null_mut(), IDI_APPLICATION) },
         ..Default::default()
     };
-    let tip = wide(if state.enabled {
+    let tip = wide(if state.timed_out && state.pending.current().is_some() {
+        "Iris: 無効・処理未確認（手動確認が必要）"
+    } else if state.enabled {
         "Iris: 有効"
     } else {
         "Iris: 無効"
@@ -351,21 +310,50 @@ fn tray(action: u32) -> bool {
     unsafe { Shell_NotifyIconW(action, &data) != 0 }
 }
 
+/// 処理が戻らない場合も、フォーカスを奪わず手動確認の必要を知らせる。
+fn notify_timeout() {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: STATE.get().window,
+        uID: 1,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_WARNING,
+        ..Default::default()
+    };
+    let title = wide("Iris: 処理・復元が未確認");
+    let message = wide("期限を超えたため無効にしました。入力・送信結果、キー状態、IME を手動確認してください。自動再送はしません。");
+    data.szInfoTitle[..title.len()].copy_from_slice(&title);
+    data.szInfo[..message.len()].copy_from_slice(&message);
+    unsafe {
+        Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+}
+
 /// 通知領域メニューから有効状態の切替と終了を行う。
 fn menu(window: HWND) {
+    if STATE.get().notifying || STATE.get().finishing || STATE.get().closing_at.is_some() {
+        return;
+    }
     unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
             return;
         }
-        let checked = if STATE.get().enabled {
+        let desired_enabled = !STATE.get().enabled;
+        let checked = if !desired_enabled {
             MF_CHECKED
         } else {
             MF_UNCHECKED
         };
         AppendMenuW(
             menu,
-            MF_STRING | checked,
+            MF_STRING
+                | checked
+                | if !STATE.get().enabled && STATE.get().pending.current().is_some() {
+                    MF_GRAYED
+                } else {
+                    0
+                },
             TOGGLE as usize,
             wide("有効").as_ptr(),
         );
@@ -388,21 +376,25 @@ fn menu(window: HWND) {
 
         match command as u32 {
             TOGGLE => {
-                cancel_pending();
-                update(|state| state.enabled = !state.enabled);
-                tray(NIM_MODIFY);
+                // メニュー中に失敗通知が来ても、「無効にする」を再有効化へ反転させない。
+                if STATE.get().closing_at.is_none()
+                    && (!desired_enabled
+                        || (STATE.get().pending.current().is_none() && !STATE.get().notifying))
+                {
+                    ime::STOP.store(true, Ordering::SeqCst);
+                    update(|state| state.enabled = desired_enabled);
+                    tray(NIM_MODIFY);
+                }
             }
             EXIT => {
-                cancel_pending();
-                update(|state| state.enabled = false);
-                PostQuitMessage(0);
+                request_exit();
             }
             _ => {}
         }
     }
 }
 
-/// 隠しウィンドウでフック外の処理と通知領域操作を受ける。
+/// 隠しウィンドウで通知領域と処理結果を受ける。
 unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
@@ -412,50 +404,50 @@ unsafe extern "system" fn window_proc(
     let taskbar_created = STATE.get().taskbar_created;
     if taskbar_created != 0 && message == taskbar_created {
         if !tray(NIM_ADD) {
-            cancel_pending();
-            update(|state| state.enabled = false);
-            PostQuitMessage(1);
+            request_exit();
         }
         return 0;
     }
-
     match message {
-        WM_SEND => send_text(wparam),
+        WM_SEND => enqueue(wparam),
         WM_REFRESH => refresh(),
-        WM_TIMER if wparam == TIMER => refresh(),
-        WM_TIMER => send_enter(wparam),
+        WM_TIMER if wparam == REFRESH => refresh(),
+        WM_TIMER if wparam == POLL => poll(),
         WM_TRAY if lparam as u32 == WM_RBUTTONUP || lparam as u32 == WM_LBUTTONUP => menu(window),
-        WM_CLOSE => {
-            cancel_pending();
-            update(|state| state.enabled = false);
-            PostQuitMessage(0);
-        }
+        WM_CLOSE => request_exit(),
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
     0
 }
 
-/// 所有するフックと通知領域アイコンを終了時に解放する。
 struct Resources {
     window: HWND,
     keyboard: HHOOK,
-    foreground: HWINEVENTHOOK,
+    mouse: HHOOK,
+    events: [HWINEVENTHOOK; 2],
 }
-
 impl Drop for Resources {
-    /// 起動途中の失敗も通常終了と同じ手順で片付ける。
+    /// 初期化失敗・終了ともフックと通知領域を片付ける。強制終了の復元は保証しない。
     fn drop(&mut self) {
-        cancel_pending();
-        update(|state| state.enabled = false);
+        ime::ABORT.store(true, Ordering::SeqCst);
+        ime::STOP.store(true, Ordering::SeqCst);
+        update(|s| s.enabled = false);
+        WORKER.with(|cell| cell.borrow_mut().take());
         unsafe {
             if !self.keyboard.is_null() {
                 UnhookWindowsHookEx(self.keyboard);
             }
-            if !self.foreground.is_null() {
-                UnhookWinEvent(self.foreground);
+            if !self.mouse.is_null() {
+                UnhookWindowsHookEx(self.mouse);
+            }
+            for event in self.events {
+                if !event.is_null() {
+                    UnhookWinEvent(event);
+                }
             }
             if !self.window.is_null() {
-                KillTimer(self.window, TIMER);
+                KillTimer(self.window, REFRESH);
+                KillTimer(self.window, POLL);
                 tray(NIM_DELETE);
                 DestroyWindow(self.window);
             }
@@ -463,11 +455,14 @@ impl Drop for Resources {
     }
 }
 
-/// ウィンドウとフックを作成し、メッセージループを開始する。
+/// 隠しウィンドウ・作業スレッド・フック・通知領域を作る。
 fn start() -> Result<(), &'static str> {
     unsafe {
-        let instance = GetModuleHandleW(null_mut());
         let class = wide("Iris.Tray.Window");
+        if !FindWindowW(class.as_ptr(), null_mut()).is_null() || ime::other_iris_running() {
+            return Err("他の Iris（通常版・診断版・試験版）を終了してから起動してください。");
+        }
+        let instance = GetModuleHandleW(null_mut());
         let definition = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
@@ -477,7 +472,6 @@ fn start() -> Result<(), &'static str> {
         if RegisterClassW(&definition) == 0 {
             return Err("ウィンドウの登録に失敗しました。");
         }
-
         let mut resources = Resources {
             window: CreateWindowExW(
                 0,
@@ -494,51 +488,78 @@ fn start() -> Result<(), &'static str> {
                 null_mut(),
             ),
             keyboard: null_mut(),
-            foreground: null_mut(),
+            mouse: null_mut(),
+            events: [null_mut(); 2],
         };
         if resources.window.is_null() {
             return Err("ウィンドウの作成に失敗しました。");
         }
-        update(|state| {
-            state.window = resources.window;
-            state.f1.down = GetAsyncKeyState(VK_F1 as i32) < 0;
-            state.taskbar_created = RegisterWindowMessageW(wide("TaskbarCreated").as_ptr());
+        update(|s| {
+            s.window = resources.window;
+            s.f1.down = GetAsyncKeyState(VK_F1 as i32) < 0;
+            s.taskbar_created = RegisterWindowMessageW(wide("TaskbarCreated").as_ptr());
+        });
+        let (tx, rx) = mpsc::sync_channel::<Request>(1);
+        let (result_tx, result_rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("iris-input-worker".into())
+            .spawn(move || {
+                while let Ok(request) = rx.recv() {
+                    if result_tx.send(ime::execute(request)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|_| "作業スレッドを開始できませんでした。")?;
+        WORKER.with(|cell| {
+            *cell.borrow_mut() = Some(Worker {
+                requests: tx,
+                replies: result_rx,
+            })
         });
         refresh();
-
-        resources.foreground = SetWinEventHook(
-            EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_FOREGROUND,
-            null_mut(),
-            Some(foreground_event),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT,
-        );
+        for (slot, event) in resources
+            .events
+            .iter_mut()
+            .zip([EVENT_SYSTEM_FOREGROUND, EVENT_OBJECT_FOCUS])
+        {
+            *slot = SetWinEventHook(
+                event,
+                event,
+                null_mut(),
+                Some(focus_event),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+        }
         resources.keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), instance, 0);
-        if resources.foreground.is_null() || resources.keyboard.is_null() {
+        resources.mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), instance, 0);
+        if resources.events.iter().any(|h| h.is_null())
+            || resources.keyboard.is_null()
+            || resources.mouse.is_null()
+        {
             return Err("入力フックの登録に失敗しました。");
         }
-        if SetTimer(resources.window, TIMER, 200, None) == 0 || !tray(NIM_ADD) {
+        if SetTimer(resources.window, REFRESH, 200, None) == 0
+            || SetTimer(resources.window, POLL, 50, None) == 0
+            || !tray(NIM_ADD)
+        {
             return Err("通知領域またはタイマーの初期化に失敗しました。");
         }
-
         let mut message = MSG::default();
         loop {
             match GetMessageW(&mut message, null_mut(), 0, 0) {
-                -1 => return Err("メッセージの取得に失敗しました。"),
+                -1 => return Err("メッセージ取得に失敗しました。処理中だった場合は入力・送信結果、キー状態、IME を手動確認してください。"),
                 0 => break,
-                _ => {
-                    TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                }
+                _ => { TranslateMessage(&message); DispatchMessageW(&message); }
             }
         }
         Ok(())
     }
 }
 
-/// 初期化に失敗した場合は常駐せず、理由を表示する。
+/// 起動または継続に失敗した場合は、理由を表示して終了する。
 pub fn run() {
     if let Err(message) = start() {
         error(message);
