@@ -5,7 +5,7 @@ use windows_sys::Win32::{
     UI::{Accessibility::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
-use crate::logic::{allowed_image, Decision, F1State};
+use crate::logic::{allowed_image, Decision, F1State, PendingSend, ENTER_DELAY_MS};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SEND: u32 = WM_APP + 2;
@@ -23,17 +23,11 @@ struct Target {
 }
 
 #[derive(Clone, Copy)]
-struct Request {
-    target: Target,
-    time: u32,
-}
-
-#[derive(Clone, Copy)]
 struct State {
     window: HWND,
     enabled: bool,
     target: Option<Target>,
-    pending: Option<Request>,
+    pending: PendingSend<Target>,
     f1: F1State,
     taskbar_created: u32,
 }
@@ -44,7 +38,7 @@ thread_local! {
         window: null_mut(),
         enabled: true,
         target: None,
-        pending: None,
+        pending: PendingSend::EMPTY,
         f1: F1State::EMPTY,
         taskbar_created: 0,
     }) };
@@ -56,12 +50,13 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 /// コールバック中に借用を保持せず状態を更新する。
-fn update(change: impl FnOnce(&mut State)) {
+fn update<R>(change: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|cell| {
         let mut state = cell.get();
-        change(&mut state);
+        let result = change(&mut state);
         cell.set(state);
-    });
+        result
+    })
 }
 
 /// 起動時や送信失敗時のエラーだけを表示する。
@@ -116,12 +111,10 @@ fn refresh() {
     let current = foreground();
     let target = current.filter(|&target| is_allowed(target));
     let target = target.filter(|_| foreground() == current);
-    update(|state| {
-        if state.target != target {
-            state.pending = None;
-        }
-        state.target = target;
-    });
+    if STATE.get().target != target {
+        cancel_pending();
+    }
+    update(|state| state.target = target);
 }
 
 /// Shift、Ctrl、Alt、Windows キーの押下を確認する。
@@ -141,10 +134,8 @@ unsafe extern "system" fn foreground_event(
     _thread: u32,
     _time: u32,
 ) {
-    update(|state| {
-        state.target = None;
-        state.pending = None;
-    });
+    cancel_pending();
+    update(|state| state.target = None);
     PostMessageW(STATE.get().window, WM_REFRESH, 0, 0);
 }
 
@@ -155,7 +146,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     }
 
     let key = &*(lparam as *const KBDLLHOOKSTRUCT);
-    if key.vkCode != VK_F1 as u32 || key.flags & LLKHF_INJECTED != 0 {
+    if key.flags & LLKHF_INJECTED != 0 {
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
 
@@ -164,27 +155,46 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         WM_KEYUP | WM_SYSKEYUP => false,
         _ => return CallNextHookEx(null_mut(), code, wparam, lparam),
     };
+    // 待機中に押した修飾キーは、Enter までに離されても予約を取り消す。
+    if down
+        && [
+            VK_SHIFT,
+            VK_LSHIFT,
+            VK_RSHIFT,
+            VK_CONTROL,
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_MENU,
+            VK_LMENU,
+            VK_RMENU,
+            VK_LWIN,
+            VK_RWIN,
+        ]
+        .contains(&(key.vkCode as u16))
+    {
+        cancel_pending();
+    }
+    if key.vkCode != VK_F1 as u32 {
+        return CallNextHookEx(null_mut(), code, wparam, lparam);
+    }
+
     let mut state = STATE.get();
     let target = state.target.filter(|&target| foreground() == Some(target));
-    let eligible = state.enabled
-        && state.pending.is_none()
-        && target.is_some()
-        && !modifiers_down()
-        && key.flags & LLKHF_ALTDOWN == 0;
+    let eligible =
+        state.enabled && target.is_some() && !modifiers_down() && key.flags & LLKHF_ALTDOWN == 0;
     let decision = state.f1.event(down, eligible, false);
 
     if decision == Decision::Send {
-        // 予約に失敗したときは、この押下を通常の F1 として通す。
-        if PostMessageW(state.window, WM_SEND, 0, 0) == 0 {
-            state.f1 = F1State::default();
-            state.f1.event(true, false, false);
-            STATE.set(state);
-            return CallNextHookEx(null_mut(), code, wparam, lparam);
+        // 待機中の対象 F1 は抑止だけ行い、予約を重ねない。
+        if let Some(id) = target.and_then(|target| state.pending.reserve(target, key.time)) {
+            if PostMessageW(state.window, WM_SEND, id, 0) == 0 {
+                state.pending.cancel();
+                state.f1 = F1State::default();
+                state.f1.event(true, false, false);
+                STATE.set(state);
+                return CallNextHookEx(null_mut(), code, wparam, lparam);
+            }
         }
-        state.pending = target.map(|target| Request {
-            target,
-            time: key.time,
-        });
     }
     STATE.set(state);
 
@@ -211,36 +221,31 @@ fn input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
-/// 遅れた予約を捨て、前面を再確認して一括で OK と Enter を送る。
-fn send_pending() {
-    let state = STATE.get();
-    update(|state| state.pending = None);
-    let Some(request) = state.pending else {
-        return;
-    };
-    if !state.enabled || unsafe { GetTickCount() }.wrapping_sub(request.time) > 250 {
-        return;
+/// 保留とタイマーを取り消す。既に届いた通知は予約の識別子で拒否する。
+fn cancel_pending() {
+    let id = update(|state| state.pending.cancel());
+    if let Some(id) = id {
+        unsafe {
+            KillTimer(STATE.get().window, id);
+        }
     }
-    if !is_allowed(request.target) {
-        return;
-    }
+}
 
-    let events = [
-        input(0, 'O' as u16, KEYEVENTF_UNICODE),
-        input(0, 'O' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
-        input(0, 'K' as u16, KEYEVENTF_UNICODE),
-        input(0, 'K' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
-        input(VK_RETURN, 0, 0),
-        input(VK_RETURN, 0, KEYEVENTF_KEYUP),
-    ];
-
-    // SendInput 自体には送信先指定がなく、この確認との間の競合は残る。
-    if unsafe { GetTickCount() }.wrapping_sub(request.time) > 250
-        || modifiers_down()
-        || foreground() != Some(request.target)
-    {
-        return;
+/// 完了した予約だけを解放し、再入で作られた別の予約を残す。
+fn finish_pending(id: usize) {
+    update(|state| state.pending.finish(id));
+    unsafe {
+        KillTimer(STATE.get().window, id);
     }
+}
+
+/// 送信直前の有効状態、修飾キーと元の前面アプリを確認する。
+fn ready(target: Target) -> bool {
+    is_allowed(target) && STATE.get().enabled && !modifiers_down() && foreground() == Some(target)
+}
+
+/// 入力の投入数を確認し、失敗時は保留を破棄して無効化する。
+fn send_inputs(events: &[INPUT]) -> bool {
     let sent = unsafe {
         SendInput(
             events.len() as u32,
@@ -248,11 +253,81 @@ fn send_pending() {
             size_of::<INPUT>() as i32,
         )
     };
-    if sent != events.len() as u32 {
+    if sent == events.len() as u32 {
+        return true;
+    }
+
+    cancel_pending();
+    update(|state| state.enabled = false);
+    tray(NIM_MODIFY);
+    error("入力の送信に失敗したため Iris を無効にしました。\n一部だけ入力された可能性があります。入力欄とキー状態を確認してください。自動再送はしません。");
+    false
+}
+
+/// 文字だけを送り、成功後にフック外で 100ms のタイマーを開始する。
+fn send_text(id: usize) {
+    let Some(target) = STATE.get().pending.target(id) else {
+        return;
+    };
+    let events = [
+        input(0, 'O' as u16, KEYEVENTF_UNICODE),
+        input(0, 'O' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+        input(0, 'K' as u16, KEYEVENTF_UNICODE),
+        input(0, 'K' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+    ];
+    let allowed = ready(target);
+    let now = unsafe { GetTickCount() };
+    if !update(|state| state.pending.begin_text(id, now, allowed)) {
+        return;
+    }
+    if !send_inputs(&events) {
+        return;
+    }
+
+    // SendInput 中の取消・再入で予約が変わっていれば Enter を予約しない。
+    let now = unsafe { GetTickCount() };
+    if !update(|state| state.pending.text_sent(id, now)) {
+        return;
+    }
+    let window = STATE.get().window;
+    if unsafe { SetTimer(window, id, ENTER_DELAY_MS, None) } == 0 {
+        cancel_pending();
         update(|state| state.enabled = false);
         tray(NIM_MODIFY);
-        error("入力の送信に失敗したため Iris を無効にしました。\n一部だけ入力された可能性があります。入力欄とキー状態を確認してください。自動再送はしません。");
+        error("Enter の待機に失敗したため Iris を無効にしました。入力欄の OK を確認してください。");
+    } else if STATE.get().pending.target(id).is_none() {
+        unsafe {
+            KillTimer(window, id);
+        }
     }
+}
+
+/// タイマーの重複通知を拒否し、条件が保たれた場合だけ Enter を送る。
+fn send_enter(id: usize) {
+    let Some(target) = STATE.get().pending.target(id) else {
+        unsafe {
+            KillTimer(STATE.get().window, id);
+        }
+        return;
+    };
+    let events = [input(VK_RETURN, 0, 0), input(VK_RETURN, 0, KEYEVENTF_KEYUP)];
+    let allowed = ready(target);
+    let now = unsafe { GetTickCount() };
+    if !update(|state| state.pending.begin_enter(id, now, allowed)) {
+        if STATE.get().pending.target(id).is_none() {
+            unsafe {
+                KillTimer(STATE.get().window, id);
+            }
+        }
+        return;
+    }
+
+    // SendInput 中も予約を保持して二重送信を防ぐ。送信先切替の競合は残る。
+    unsafe {
+        KillTimer(STATE.get().window, id);
+    }
+    send_inputs(&events);
+    finish_pending(id);
 }
 
 /// 通知領域アイコンの状態を登録・更新・削除する。
@@ -313,13 +388,13 @@ fn menu(window: HWND) {
 
         match command as u32 {
             TOGGLE => {
-                update(|state| {
-                    state.enabled = !state.enabled;
-                    state.pending = None;
-                });
+                cancel_pending();
+                update(|state| state.enabled = !state.enabled);
                 tray(NIM_MODIFY);
             }
             EXIT => {
+                cancel_pending();
+                update(|state| state.enabled = false);
                 PostQuitMessage(0);
             }
             _ => {}
@@ -337,16 +412,24 @@ unsafe extern "system" fn window_proc(
     let taskbar_created = STATE.get().taskbar_created;
     if taskbar_created != 0 && message == taskbar_created {
         if !tray(NIM_ADD) {
+            cancel_pending();
+            update(|state| state.enabled = false);
             PostQuitMessage(1);
         }
         return 0;
     }
 
     match message {
-        WM_SEND => send_pending(),
-        WM_REFRESH | WM_TIMER => refresh(),
+        WM_SEND => send_text(wparam),
+        WM_REFRESH => refresh(),
+        WM_TIMER if wparam == TIMER => refresh(),
+        WM_TIMER => send_enter(wparam),
         WM_TRAY if lparam as u32 == WM_RBUTTONUP || lparam as u32 == WM_LBUTTONUP => menu(window),
-        WM_CLOSE => PostQuitMessage(0),
+        WM_CLOSE => {
+            cancel_pending();
+            update(|state| state.enabled = false);
+            PostQuitMessage(0);
+        }
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
     0
@@ -362,6 +445,8 @@ struct Resources {
 impl Drop for Resources {
     /// 起動途中の失敗も通常終了と同じ手順で片付ける。
     fn drop(&mut self) {
+        cancel_pending();
+        update(|state| state.enabled = false);
         unsafe {
             if !self.keyboard.is_null() {
                 UnhookWindowsHookEx(self.keyboard);
