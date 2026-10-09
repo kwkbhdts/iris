@@ -51,3 +51,10 @@ jobs:
           path: target/x86_64-pc-windows-msvc/release/iris-diagnostic.exe
           if-no-files-found: error
           retention-days: 14
+      - name: Upload IME trial executable
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iris-ime-trial-windows-x64
+          path: target/x86_64-pc-windows-msvc/release/iris-ime-trial.exe
+          if-no-files-found: error
+          retention-days: 14
