@@ -54,7 +54,9 @@ impl F1State {
 /// パス末尾の実行ファイル名だけを大文字小文字を無視して照合する。
 pub fn allowed_image(path: &str) -> bool {
     let name = path.rsplit(['\\', '/']).next().unwrap_or_default();
-    name.eq_ignore_ascii_case("Claude.exe") || name.eq_ignore_ascii_case("firefox.exe")
+    ["Claude.exe", "firefox.exe", "chrome.exe", "ChatGPT.exe"]
+        .iter()
+        .any(|expected| name.eq_ignore_ascii_case(expected))
 }
 
 #[derive(Clone, Copy)]
@@ -159,6 +161,10 @@ mod tests {
             r"C:\Apps\Claude.exe",
             r"C:\Firefox\FIREFOX.EXE",
             "claude.EXE",
+            "chrome.exe",
+            r"C:\Chrome\CHROME.EXE",
+            "ChatGPT.exe",
+            r"C:\Apps\CHATGPT.EXE",
         ] {
             assert!(allowed_image(path));
         }
@@ -167,7 +173,14 @@ mod tests {
             "Claude.exe.bak",
             "myfirefox.exe",
             "firefox",
-            "chrome.exe",
+            "chrome.exe.bak",
+            "mychrome.exe",
+            "chrome",
+            "msedge.exe",
+            "codex.exe",
+            "ChatGPT.exe.bak",
+            "myChatGPT.exe",
+            "ChatGPT",
         ] {
             assert!(!allowed_image(path));
         }
