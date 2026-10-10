@@ -1,8 +1,8 @@
 use crate::{
-    diagnostic::WindowId,
     ime::{self, Completion, Request},
     logic::{Decision, F1State, Pending},
     model,
+    types::WindowId,
 };
 use std::{
     cell::{Cell, RefCell},

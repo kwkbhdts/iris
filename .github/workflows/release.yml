@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact main commit and successful Build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag/package version mismatch' }
+          $commit = (& git rev-parse HEAD).Trim()
+          $main = (& git rev-parse origin/main).Trim()
+          if ($commit -ne $main) { throw 'Release tag must point at the exact main commit' }
+          $json = & gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/build.yml/runs?branch=main&head_sha=$commit&status=completed"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify Build CI with actions:read' }
+          $runs = ($json | ConvertFrom-Json).workflow_runs
+          if (-not ($runs | Where-Object { $_.head_sha -eq $commit -and $_.event -eq 'push' -and $_.conclusion -eq 'success' })) {
+            throw 'No successful Build for this exact main commit'
+          }
+          $releases = & gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing releases' }
+          if (($releases | ConvertFrom-Json) | Where-Object { $_.tag_name -eq $env:GITHUB_REF_NAME }) { throw 'Release already exists; refusing to overwrite' }
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --target x86_64-pc-windows-msvc
+          rustup default 1.99.0
+      - name: Build exact tagged source
+        run: cargo build --locked --release --bin iris --target x86_64-pc-windows-msvc
+      - name: Package executable and notices
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Publish release
+        shell: pwsh
+        run: |
+          gh release create $env:GITHUB_REF_NAME dist/iris.exe dist/THIRD_PARTY_NOTICES.txt dist/RUST-LIBRARY.html dist/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --verify-tag --title "Iris $env:GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
+      - name: Download published assets and verify SHA-256
+        shell: pwsh
+        run: |
+          gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --dir downloaded
+          if ($LASTEXITCODE -ne 0) { throw 'Published asset download failed' }
+          if ((Get-FileHash dist/SHA256SUMS.txt).Hash -ne (Get-FileHash downloaded/SHA256SUMS.txt).Hash) { throw 'Manifest mismatch' }
+          foreach ($line in Get-Content dist/SHA256SUMS.txt) {
+            $parts = $line -split '  ', 2
+            $actual = (Get-FileHash (Join-Path downloaded $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $parts[0]) { throw "Downloaded hash mismatch: $($parts[1])" }
+            "$actual  $($parts[1])" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }

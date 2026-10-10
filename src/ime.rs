@@ -1,6 +1,6 @@
 use crate::{
-    diagnostic::*,
     model::{self, Backend, InputReply, DEADLINE_MS, RESTORE_DELAY_MS},
+    types::*,
 };
 use std::{
     mem::size_of,
@@ -240,7 +240,6 @@ impl Backend for ImeBackend {
             return InputReply {
                 attempted: false,
                 inserted: 0,
-                error: 0,
             };
         }
         let inputs = [
@@ -261,7 +260,6 @@ impl Backend for ImeBackend {
             InputReply {
                 attempted: true,
                 inserted,
-                error: GetLastError(),
             }
         }
     }

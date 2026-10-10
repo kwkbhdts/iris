@@ -1,5 +1,6 @@
-use super::diagnostic::ImeReply;
+use super::types::ImeReply;
 
+#[cfg(windows)]
 pub const RESTORE_DELAY_MS: u32 = 100;
 pub const DEADLINE_MS: u32 = 500;
 pub const INPUT_COUNT: u32 = 6;
@@ -18,7 +19,6 @@ pub fn own_input(injected: bool, tag: usize, expected: usize) -> bool {
 pub struct InputReply {
     pub attempted: bool,
     pub inserted: u32,
-    pub error: u32,
 }
 
 pub trait Backend {
@@ -40,30 +40,6 @@ pub struct Outcome {
     pub status: &'static str,
     pub manual: bool,
     pub input: Option<InputReply>,
-    pub trace: Vec<(&'static str, ImeReply)>,
-}
-
-impl Outcome {
-    /// 投入結果と IME 応答を表示し、実際の送信成功とは表現しない。
-    pub fn render(&self) -> String {
-        let mut text = format!("trial_status={}\nmanual_check_required={}\ntext_to_enter_wait_ms=0\nrestore_delay_if_original_on_ms={} (experimental; not_app_completion)\n", self.status, self.manual, RESTORE_DELAY_MS);
-        if let Some(input) = self.input {
-            text.push_str(&format!(
-                "send_input_attempted={}; inserted={}/{}; error={}\n",
-                input.attempted, input.inserted, INPUT_COUNT, input.error
-            ));
-        } else {
-            text.push_str("send_input_attempted=false\n");
-        }
-        text.push_str("app_consumption=unknown; chat_send_success=unknown\n");
-        for (name, value) in &self.trace {
-            text.push_str(&format!("{name}: {}\n", value.describe()));
-        }
-        if self.manual {
-            text.push_str("手動確認が必要です。入力・送信結果、キー状態、IME を確認してください。再試験は手動確認後に終了・再起動してください。\n");
-        }
-        text
-    }
 }
 
 /// 元の応答0/1を分岐し、入力一回と条件付き復元だけを実行する。
@@ -72,13 +48,11 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
         status: "skipped_before_change",
         manual: false,
         input: None,
-        trace: vec![],
     };
     if backend.closing() || !backend.guarded() {
         return out;
     }
     let original = backend.read_open();
-    out.trace.push(("open_before", original));
     let was_on = match original {
         ImeReply::Raw(0) => false,
         ImeReply::Raw(1) => true,
@@ -94,14 +68,12 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
         out.manual = true;
         out.status = "off_request_unconfirmed; no_input";
         let off = backend.set_open(false);
-        out.trace.push(("set_off_reply", off));
         if !matches!(off, ImeReply::Raw(0)) || !backend.guarded() {
             return out;
         }
     }
 
     let off = backend.read_open();
-    out.trace.push(("open_before_input", off));
     if !matches!(off, ImeReply::Raw(0)) || !backend.guarded() {
         out.status = "off_not_confirmed_or_guard_failed; no_input";
         return out;
@@ -140,18 +112,15 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
         return out;
     }
     let current = backend.read_open();
-    out.trace.push(("open_before_restore", current));
     if !matches!(current, ImeReply::Raw(0)) || !backend.guarded() {
         return out;
     }
     out.status = "restore_request_unconfirmed";
     let restored = backend.set_open(true);
-    out.trace.push(("set_on_reply", restored));
     if !matches!(restored, ImeReply::Raw(0)) || !backend.guarded() {
         return out;
     }
     let after = backend.read_open();
-    out.trace.push(("open_after_restore", after));
     if matches!(after, ImeReply::Raw(1)) && backend.guarded() {
         out.manual = false;
         out.status = if sent {
@@ -188,7 +157,6 @@ mod tests {
                 input: InputReply {
                     attempted: true,
                     inserted: INPUT_COUNT,
-                    error: 0,
                 },
                 valid: true,
                 close: false,
@@ -240,8 +208,7 @@ mod tests {
         let r = run(&mut f);
         assert_eq!(f.events, ["send"]);
         assert!(!r.manual);
-        assert!(r.render().contains("chat_send_success=unknown"));
-        assert!(r.render().contains("text_to_enter_wait_ms=0"));
+        assert!(r.status.contains("app_result_unknown"));
     }
 
     /// オフを読み取ってから一回入力し、待機は復元の前だけに置く。
@@ -296,7 +263,6 @@ mod tests {
             for on in [false, true] {
                 let mut f = if on { Fake::on() } else { Fake::off() };
                 f.input.inserted = count;
-                f.input.error = 5;
                 let r = run(&mut f);
                 assert!(r.manual);
                 assert_eq!(f.events.iter().filter(|&&e| e == "send").count(), 1);
@@ -323,7 +289,6 @@ mod tests {
         f.input = InputReply {
             attempted: false,
             inserted: 0,
-            error: 0,
         };
         let r = run(&mut f);
         assert!(!r.manual);
