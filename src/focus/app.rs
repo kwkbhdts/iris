@@ -1,5 +1,6 @@
 use crate::{
-    logic::{allowed_image, Decision, F1State},
+    diagnostic::{App, Context},
+    logic::{Decision, F1State},
     policy, uia,
 };
 use std::{
@@ -29,16 +30,18 @@ pub struct Window {
 }
 #[derive(Clone, Copy)]
 pub struct Request {
+    pub context: Context,
     pub window: Window,
     pub epoch: u64,
     pub started: Instant,
     pub register: bool,
 }
 struct State {
-    target: Option<Window>,
+    target: Option<(Window, App)>,
     keys: [F1State; 2],
     sender: SyncSender<Request>,
-    active: Option<Instant>,
+    active: Option<Request>,
+    next_id: u64,
     timed_out: bool,
 }
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
@@ -58,17 +61,18 @@ pub fn foreground() -> Option<Window> {
 }
 
 /// 対象名の照会はキーフック外で行い、パスを表示・保存しない。
-pub fn allowed(window: Window) -> bool {
+pub fn identify(window: Window) -> Option<App> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, window.pid);
         if process.is_null() {
-            return false;
+            return None;
         }
         let mut buffer = [0u16; 32768];
         let mut length = buffer.len() as u32;
         let ok = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) != 0;
         CloseHandle(process);
-        ok && allowed_image(&String::from_utf16_lossy(&buffer[..length as usize]))
+        ok.then(|| App::from_path(&String::from_utf16_lossy(&buffer[..length as usize])))
+            .flatten()
     }
 }
 
@@ -81,15 +85,21 @@ fn modifiers() -> bool {
 
 /// UIA 呼び出しの間ごとに前面・介入・期限を確認する。
 pub fn check(request: Request) -> Result<(), &'static str> {
-    if STOP.load(Ordering::SeqCst)
-        || !policy::valid(
-            foreground() == Some(request.window),
-            EPOCH.load(Ordering::SeqCst) == request.epoch,
-            request.started.elapsed().as_millis(),
-        )
-        || modifiers()
-    {
-        Err("cancelled: foreground/input changed or deadline exceeded")
+    let same_window = foreground() == Some(request.window);
+    let same_epoch = EPOCH.load(Ordering::SeqCst) == request.epoch;
+    let elapsed = request.started.elapsed().as_millis();
+    if STOP.load(Ordering::SeqCst) {
+        Err("stopped")
+    } else if !policy::valid(same_window, same_epoch, elapsed) {
+        Err(if !same_window {
+            "foreground_changed"
+        } else if !same_epoch {
+            "input_or_foreground_intervention"
+        } else {
+            "deadline_exceeded"
+        })
+    } else if modifiers() {
+        Err("modifier_down")
     } else {
         Ok(())
     }
@@ -99,19 +109,33 @@ pub fn check(request: Request) -> Result<(), &'static str> {
 fn refresh() {
     let current = foreground();
     let target = current
-        .filter(|&w| allowed(w))
+        .and_then(|w| identify(w).map(|app| (w, app)))
         .filter(|_| foreground() == current);
     STATE.with(|s| {
         let mut borrow = s.borrow_mut();
-        let Some(state) = borrow.as_mut() else { return; };
+        let Some(state) = borrow.as_mut() else {
+            return;
+        };
         state.target = target;
 
-        let expired = state.active.is_some_and(|at| at.elapsed().as_millis() >= policy::BUDGET_MS);
+        let expired = state
+            .active
+            .is_some_and(|request| request.started.elapsed().as_millis() >= policy::BUDGET_MS);
         if BUSY.load(Ordering::SeqCst) && !state.timed_out && expired {
             state.timed_out = true;
             STOP.store(true, Ordering::SeqCst);
             EPOCH.fetch_add(1, Ordering::SeqCst);
-            eprintln!("TIMEOUT: probe disabled. An in-flight SetFocus may finish late; close and restart.");
+            if let Some(request) = state.active {
+                eprintln!(
+                    "{}",
+                    request.context.line(
+                        "watchdog",
+                        format_args!(
+                            "result=timeout restart_required=true late_focus_possible=true"
+                        )
+                    )
+                );
+            }
         }
     });
 }
@@ -165,7 +189,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         let Some(state) = borrow.as_mut() else {
             return false;
         };
-        let target = state.target.filter(|&w| foreground() == Some(w));
+        let target = state.target.filter(|&(w, _)| foreground() == Some(w));
         let eligible = target.is_some()
             && !STOP.load(Ordering::SeqCst)
             && !modifiers()
@@ -175,13 +199,23 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             // 別の操作キーも前の処理を中止し、処理中には予約を追加しない。
             let epoch = EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
             if !BUSY.swap(true, Ordering::SeqCst) {
+                let (window, app) = target.unwrap();
+                let started = Instant::now();
+                let context = Context {
+                    id: state.next_id,
+                    register: index == Some(1),
+                    app,
+                    started,
+                };
+                state.next_id += 1;
                 let request = Request {
-                    window: target.unwrap(),
+                    context,
+                    window,
                     epoch,
-                    started: Instant::now(),
+                    started,
                     register: index == Some(1),
                 };
-                state.active = Some(request.started);
+                state.active = Some(request);
                 if state.sender.try_send(request).is_err() {
                     BUSY.store(false, Ordering::SeqCst);
                 }
@@ -200,26 +234,15 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 fn worker(receiver: mpsc::Receiver<Request>) {
     match uia::Session::new() {
         Ok(mut session) => {
-            println!("Ready: click the composer, F2 to register; F1 to return. No text/Enter/IME writes.");
+            println!("req=0 key=- app=- stage=ready ms=0 F2=register F1=focus no_text_enter_ime_writes=true");
             while let Ok(request) = receiver.recv() {
-                let result = session.execute(request);
-                // タイマーの次回発火より先に戻った期限切れも無効化する。
-                if request.started.elapsed().as_millis() >= policy::BUDGET_MS {
-                    STOP.store(true, Ordering::SeqCst);
-                }
-                if STOP.load(Ordering::SeqCst) {
-                    eprintln!("Stopped or timed out: close and restart; an in-flight focus change cannot be undone.");
-                } else {
-                    match result {
-                        Ok(message) => println!("{message}"),
-                        Err(message) => println!("FAILED: {message}; register again with F2"),
-                    }
-                }
+                let report = session.execute(request);
+                println!("{report}");
                 BUSY.store(false, Ordering::SeqCst);
             }
         }
         Err(_) => {
-            eprintln!("UIA initialization failed. Close this window; probe disabled.");
+            eprintln!("req=0 key=- app=- stage=init ms=0 result=failed restart_required=true");
             STOP.store(true, Ordering::SeqCst);
         }
     }
@@ -227,11 +250,11 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 
 /// コンソールを開いて操作を待ち、Enter による終了時にフックを外す。
 pub fn run() {
-    println!("Iris focus-only prototype — stop normal Iris first. No uncommitted IME text.\nPress Enter in this console to exit. Logs contain status/control type only.");
+    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     unsafe {
         let class: Vec<u16> = "Iris.Tray.Window".encode_utf16().chain(Some(0)).collect();
         if !FindWindowW(class.as_ptr(), null_mut()).is_null() {
-            eprintln!("Another Iris is running. Exit it first.");
+            eprintln!("req=0 key=- app=- stage=init ms=0 result=another_iris_running");
             return;
         }
         let instance = GetModuleHandleW(null_mut());
@@ -242,7 +265,7 @@ pub fn run() {
             ..Default::default()
         };
         if RegisterClassW(&definition) == 0 {
-            eprintln!("Window registration failed.");
+            eprintln!("req=0 key=- app=- stage=init ms=0 result=window_registration_failed");
             return;
         }
         // 通常版にも既存 Iris と認識される隠しウィンドウを持つ。
@@ -261,7 +284,7 @@ pub fn run() {
             null_mut(),
         );
         if guard_window.is_null() {
-            eprintln!("Guard window creation failed.");
+            eprintln!("req=0 key=- app=- stage=init ms=0 result=guard_window_failed");
             return;
         }
         let mut msg: MSG = std::mem::zeroed();
@@ -277,6 +300,7 @@ pub fn run() {
                 keys,
                 sender,
                 active: None,
+                next_id: 1,
                 timed_out: false,
             })
         });
@@ -301,7 +325,7 @@ pub fn run() {
         );
         let timer = SetTimer(null_mut(), 0, 100, None);
         if keyboard_hook.is_null() || mouse_hook.is_null() || event_hook.is_null() || timer == 0 {
-            eprintln!("Hook/timer initialization failed.");
+            eprintln!("req=0 key=- app=- stage=init ms=0 result=hook_timer_failed");
         } else {
             refresh();
             while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {

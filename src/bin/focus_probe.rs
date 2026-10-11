@@ -2,6 +2,9 @@
 #[path = "../focus/app.rs"]
 mod app;
 #[cfg(any(windows, test))]
+#[path = "../focus/diagnostic.rs"]
+mod diagnostic;
+#[cfg(any(windows, test))]
 #[path = "../logic.rs"]
 #[allow(dead_code)]
 mod logic;

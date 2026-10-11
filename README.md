@@ -69,7 +69,7 @@ cargo build --locked --release --bin iris --target x86_64-pc-windows-msvc
 
 `dev` で変更を検証し、PR のレビューと CI 確認後に `main` へマージします。[Build CI](https://github.com/kwkbhdts/iris/actions/workflows/build.yml) は通常版をビルドし、`iris-windows-x64` に exe・ライセンス表示・ハッシュを保存します。診断・比較用アプリのソースは Git 履歴に残っていますが、通常版の配布対象には含めません。
 
-開発中の独立した [フォーカス専用試作](FOCUS_PROBE.md) は、別 artifact `iris-focus-probe-windows-x64` に保存します。F2 で手動登録した入力欄へ F1 で戻るだけで、文字入力・送信・IME 変更は行いません。通常版とは同時に使わず、4アプリとも実機未検証です。
+開発中の独立した [フォーカス専用試作](FOCUS_PROBE.md) は、別 artifact `iris-focus-probe-windows-x64` に保存します。F2 で手動登録した入力欄へ F1 で戻るだけで、文字入力・送信・IME 変更は行いません。通常版とは同時に使わず、今回の診断版は実機未検証です。
 
 [Release CI](https://github.com/kwkbhdts/iris/actions/workflows/release.yml) は、タグが main の正確なコミットを指し、そのコミットの Build が成功していることを確認してから、同じソースをビルドして正式リリースへ添付します。別 workflow の artifact 再取得は行いません。`GITHUB_TOKEN` の `actions:read` は CI 確認、`contents:write` はリリース作成に限定して使い、公開した添付ファイルを再ダウンロードしてハッシュを照合します。
 
