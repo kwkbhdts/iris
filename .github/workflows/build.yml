@@ -85,3 +85,15 @@ jobs:
           path: dist-path/*
           if-no-files-found: error
           retention-days: 14
+      - name: Build registration-free focus prototype
+        run: cargo build --locked --release --features focus-probe --bin iris-auto-focus-probe --target x86_64-pc-windows-msvc
+      - name: Package registration-free focus prototype
+        shell: pwsh
+        run: ./scripts/package-auto-focus.ps1
+      - name: Upload registration-free focus prototype
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iris-auto-focus-probe-windows-x64
+          path: dist-auto-focus/*
+          if-no-files-found: error
+          retention-days: 14
