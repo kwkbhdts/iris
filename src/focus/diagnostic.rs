@@ -1,6 +1,6 @@
 use std::{fmt, time::Instant};
 
-const MAX_LINES: usize = 192;
+const MAX_LINES: usize = 320;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum App {

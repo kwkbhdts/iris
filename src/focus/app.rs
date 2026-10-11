@@ -250,7 +250,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 
 /// コンソールを開いて操作を待ち、Enter による終了時にフックを外す。
 pub fn run() {
-    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v2 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     unsafe {
         let class: Vec<u16> = "Iris.Tray.Window".encode_utf16().chain(Some(0)).collect();
         if !FindWindowW(class.as_ptr(), null_mut()).is_null() {

@@ -3,7 +3,11 @@ use crate::{
     diagnostic::Trace,
     policy,
 };
-use std::{ptr::null_mut, sync::atomic::Ordering};
+use std::{
+    ptr::null_mut,
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 use windows::{
     core::Interface,
     Win32::{Foundation::HWND, System::Com::*, UI::Accessibility::*},
@@ -211,7 +215,7 @@ impl Session {
         guard(trace, request)
     }
 
-    /// 既存の32ノード探索を保ち、ルート自身を Document に数えない条件も変えない。
+    /// 最大64ノードまで探索し、ルート自身を Document に数えない条件も変えない。
     unsafe fn document(
         &self,
         element: &IUIAutomationElement,
@@ -360,6 +364,71 @@ impl Session {
         Ok(())
     }
 
+    /// SetFocus 一回の後だけを読み取り、遅延一致を即時成功へ昇格しない。
+    unsafe fn observe_late_focus(
+        &self,
+        registered: &IUIAutomationElement,
+        initial: &IUIAutomationElement,
+        set_completed: Instant,
+        request: Request,
+        trace: &mut Trace,
+    ) -> Result<()> {
+        trace.stage = "focus.late";
+        for target_ms in [50u128, 150] {
+            loop {
+                guard(trace, request)?;
+                let Some(wait_ms) = policy::observation_wait(
+                    request.started.elapsed().as_millis(),
+                    set_completed.elapsed().as_millis(),
+                    target_ms,
+                ) else {
+                    trace.record(format_args!(
+                        "target_ms={target_ms} sample=skipped reason=insufficient_request_budget"
+                    ));
+                    return Err("insufficient_request_budget");
+                };
+                if wait_ms == 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(wait_ms));
+            }
+            guard(trace, request)?;
+            let sample_start_ms = set_completed.elapsed().as_millis();
+            trace.record(format_args!(
+                "target_ms={target_ms} sample=start since_set_ms={sample_start_ms}"
+            ));
+            let actual = call!(
+                trace,
+                request,
+                "GetFocusedElement(late)",
+                self.automation.GetFocusedElement()
+            )?;
+            let same_registered = call!(
+                trace,
+                request,
+                "CompareElements(late,registered)",
+                self.automation.CompareElements(&actual, registered)
+            )?
+            .as_bool();
+            let same_before = call!(
+                trace,
+                request,
+                "CompareElements(late,before)",
+                self.automation.CompareElements(&actual, initial)
+            )?
+            .as_bool();
+            let kind = call!(
+                trace,
+                request,
+                "CurrentControlType(late)",
+                actual.CurrentControlType()
+            )?;
+            guard(trace, request)?;
+            trace.record(format_args!("target_ms={target_ms} sample=end sample_start_ms={sample_start_ms} sample_end_ms={} late_match={same_registered} same_before={same_before} actual_control_type={} diagnostic_only=true", set_completed.elapsed().as_millis(), kind.0));
+        }
+        Ok(())
+    }
+
     /// F2 登録と F1 一回の移動を従来と同じ条件で実行する。
     unsafe fn perform(&mut self, request: Request, trace: &mut Trace) -> Result<&'static str> {
         trace.stage = "foreground";
@@ -497,6 +566,7 @@ impl Session {
         // 確認と SetFocus は不可分ではない。呼び出しは従来どおり一回のみ。
         guard(trace, request)?;
         let hr = (registered.element.vtable().SetFocus)(registered.element.as_raw());
+        let set_completed = Instant::now();
         api(trace, "SetFocus", hr.ok())?;
         trace.record(format_args!(
             "api=SetFocus hr=0x{:08X} result=success",
@@ -519,6 +589,22 @@ impl Session {
         .as_bool();
         trace.record(format_args!("same_registered={same}"));
         if !same {
+            // 即時結果は確定済み。遅延観測中に介入・API失敗があれば追加照会も止める。
+            if self
+                .observe_late_focus(
+                    &registered.element,
+                    &initial_focus,
+                    set_completed,
+                    request,
+                    trace,
+                )
+                .is_err()
+            {
+                trace.record(format_args!(
+                    "late_observation_incomplete=true immediate_match=false"
+                ));
+                return Err("actual_focus_differs");
+            }
             if self
                 .diagnose_mismatch(
                     &registered.element,
