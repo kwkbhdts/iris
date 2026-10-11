@@ -23,7 +23,7 @@ jobs:
       - name: Check formatting
         run: cargo +1.99.0 fmt --check
       - name: Run logic tests
-        run: cargo +1.99.0 test --locked
+        run: cargo +1.99.0 test --locked --features focus-probe
 
   windows:
     name: Build Windows x64 executable
@@ -47,5 +47,17 @@ jobs:
         with:
           name: iris-windows-x64
           path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build focus-only prototype
+        run: cargo build --locked --release --features focus-probe --bin iris-focus-probe --target x86_64-pc-windows-msvc
+      - name: Package focus-only prototype
+        shell: pwsh
+        run: ./scripts/package-focus.ps1
+      - name: Upload focus-only prototype
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iris-focus-probe-windows-x64
+          path: dist-focus/*
           if-no-files-found: error
           retention-days: 14
