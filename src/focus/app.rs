@@ -1,6 +1,6 @@
 use crate::{
-    diagnostic::{App, Context, Trace},
-    intervention::{self, Events, Kind},
+    diagnostic::{self, App, Context, Trace},
+    intervention::{self, Events, Kind, Observation, Truth},
     logic::{Decision, F1State},
     policy, uia,
 };
@@ -127,8 +127,8 @@ pub fn trace_interventions(
     let mut counts = [0u64; intervention::KIND_COUNT];
     let mut injected = 0;
     for event in &snapshot.events {
-        counts[event.kind as usize] += 1;
-        if event.injected {
+        counts[event.observation.kind as usize] += 1;
+        if event.observation.injected == Truth::True {
             injected += 1;
         }
     }
@@ -139,9 +139,25 @@ pub fn trace_interventions(
         .iter()
         .skip(snapshot.events.len().saturating_sub(8))
     {
-        let same_request_window = (event.kind == Kind::Foreground && event.window != 0)
-            .then_some(event.window == request.window.hwnd);
-        trace.record(format_args!("intervention_point={point} event_epoch={} kind={} injected={} event_since_request_ms={} received_since_request_ms={} delivery_delay_ms={} same_request_window={same_request_window:?} attribution=unknown", event.epoch, event.kind.label(), event.injected, intervention::relative_tick(event.event_tick, request.start_tick), intervention::relative_tick(event.received_tick, request.start_tick), event.received_tick.wrapping_sub(event.event_tick)));
+        let observation = event.observation;
+        let same_request_window = if observation.kind == Kind::Foreground && observation.window != 0
+        {
+            Truth::known(observation.window == request.window.hwnd)
+        } else {
+            Truth::Unknown
+        };
+        let same_request_process =
+            if observation.kind == Kind::Foreground && observation.window_pid != 0 {
+                Truth::known(observation.window_pid == request.window.pid)
+            } else {
+                Truth::Unknown
+            };
+        let injected = if matches!(observation.kind, Kind::Foreground | Kind::Watchdog) {
+            "not_applicable"
+        } else {
+            observation.injected.label()
+        };
+        trace.record(format_args!("intervention_point={point} event_epoch={} kind={} injected={injected} received_mono_us={:?} event_tick_delta_ms={} received_tick_delta_ms={} delivery_tick_delta_ms={} tick_clock=coarse same_request_window={} same_request_process={} same_received_foreground={} attribution=unknown", event.epoch, observation.kind.label(), diagnostic::relative_mono_us(observation.received_mono_ns, diagnostic::mono_ns(request.started)), intervention::relative_tick(observation.event_tick, request.start_tick), intervention::relative_tick(observation.received_tick, request.start_tick), observation.received_tick.wrapping_sub(observation.event_tick), same_request_window.label(), same_request_process.label(), observation.same_received_foreground.label()));
     }
 }
 
@@ -165,7 +181,8 @@ fn refresh() {
             state.timed_out = true;
             STOP.store(true, Ordering::SeqCst);
             let tick = unsafe { GetTickCount() };
-            EVENTS.record(Kind::Watchdog, false, tick, tick, 0);
+            let received = Instant::now();
+            EVENTS.record(|| observe(Kind::Watchdog, Truth::Unknown, tick, received));
             if let Some(request) = state.active {
                 eprintln!(
                     "{}",
@@ -181,7 +198,21 @@ fn refresh() {
     });
 }
 
-/// 前面切替は往復しても要求を失効させる。
+/// 時計と既知の分類だけを記録し、前面通知以外の所属情報は不明にする。
+fn observe(kind: Kind, injected: Truth, event_tick: u32, received: Instant) -> Observation {
+    Observation {
+        kind,
+        injected,
+        event_tick,
+        received_tick: unsafe { GetTickCount() },
+        received_mono_ns: diagnostic::mono_ns(received),
+        window: 0,
+        window_pid: 0,
+        same_received_foreground: Truth::Unknown,
+    }
+}
+
+/// 先に失効させ、受信時の有限な所属照会を診断専用として付ける。
 unsafe extern "system" fn foreground_event(
     _: HWINEVENTHOOK,
     _: u32,
@@ -191,13 +222,24 @@ unsafe extern "system" fn foreground_event(
     _: u32,
     event_tick: u32,
 ) {
-    EVENTS.record(
-        Kind::Foreground,
-        false,
-        event_tick,
-        GetTickCount(),
-        window as usize,
-    );
+    let received = Instant::now();
+    EVENTS.record(|| {
+        let mut observation = observe(Kind::Foreground, Truth::Unknown, event_tick, received);
+        observation.window = window as usize;
+        if !window.is_null() {
+            let before = GetForegroundWindow();
+            let mut pid = 0;
+            let tid = GetWindowThreadProcessId(window, &mut pid);
+            let after = GetForegroundWindow();
+            if tid != 0 && pid != 0 {
+                observation.window_pid = pid;
+                if !before.is_null() && before == after {
+                    observation.same_received_foreground = Truth::known(window == before);
+                }
+            }
+        }
+        observation
+    });
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.target = None;
@@ -208,6 +250,7 @@ unsafe extern "system" fn foreground_event(
 /// マウス操作の内容を記録せず、介入だけを数える。
 unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
+        let received = Instant::now();
         // 座標やボタン値をコピーせず、種別・注入フラグ・時刻だけを読む。
         let data = lparam as *const MSLLHOOKSTRUCT;
         let kind = match wparam as u32 {
@@ -217,13 +260,14 @@ unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
             WM_MOUSEWHEEL | WM_MOUSEHWHEEL => Kind::MouseWheel,
             _ => Kind::MouseOther,
         };
-        EVENTS.record(
-            kind,
-            (*data).flags & LLMHF_INJECTED != 0,
-            (*data).time,
-            GetTickCount(),
-            0,
-        );
+        EVENTS.record(|| {
+            observe(
+                kind,
+                Truth::known((*data).flags & LLMHF_INJECTED != 0),
+                (*data).time,
+                received,
+            )
+        });
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
 }
@@ -233,6 +277,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     if code != HC_ACTION as i32 {
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
+    let received = Instant::now();
     let key = &*(lparam as *const KBDLLHOOKSTRUCT);
     let index = if key.vkCode == VK_F1 as u32 {
         Some(0)
@@ -242,13 +287,14 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         None
     };
     if key.flags & LLKHF_INJECTED != 0 || index.is_none() {
-        EVENTS.record(
-            Kind::KeyboardOther,
-            key.flags & LLKHF_INJECTED != 0,
-            key.time,
-            GetTickCount(),
-            0,
-        );
+        EVENTS.record(|| {
+            observe(
+                Kind::KeyboardOther,
+                Truth::known(key.flags & LLKHF_INJECTED != 0),
+                key.time,
+                received,
+            )
+        });
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
     let down = matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
@@ -266,10 +312,11 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         if decision == Decision::Send {
             // 別の操作キーも前の処理を中止し、処理中には予約を追加しない。
             let start_tick = GetTickCount();
-            let epoch = EVENTS.record(Kind::NewShortcut, false, key.time, start_tick, 0);
+            let epoch =
+                EVENTS.record(|| observe(Kind::NewShortcut, Truth::False, key.time, received));
             if !BUSY.swap(true, Ordering::SeqCst) {
                 let (window, app) = target.unwrap();
-                let started = Instant::now();
+                let started = received;
                 let context = Context {
                     id: state.next_id,
                     register: index == Some(1),
@@ -320,7 +367,8 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 
 /// コンソールを開いて操作を待ち、Enter による終了時にフックを外す。
 pub fn run() {
-    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v3 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+    diagnostic::initialize_clock();
+    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v4 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     unsafe {
         let class: Vec<u16> = "Iris.Tray.Window".encode_utf16().chain(Some(0)).collect();
         if !FindWindowW(class.as_ptr(), null_mut()).is_null() {

@@ -1,4 +1,29 @@
-use std::{fmt, time::Instant};
+use std::{fmt, sync::OnceLock, time::Instant};
+
+static CLOCK: OnceLock<Instant> = OnceLock::new();
+
+/// フック登録前に共通の単調時計の原点を決める。
+pub fn initialize_clock() {
+    CLOCK.get_or_init(Instant::now);
+}
+
+/// 同じ Instant 時計の時刻を固定長記録へ変換する。不明は番兵値にする。
+pub fn mono_ns(at: Instant) -> u64 {
+    CLOCK
+        .get()
+        .and_then(|origin| at.checked_duration_since(*origin))
+        .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
+        .unwrap_or(u64::MAX)
+}
+
+/// 異なる時計は混ぜず、共通原点の時刻だけを要求からの相対usへ直す。
+pub fn relative_mono_us(value: u64, origin: u64) -> Option<i128> {
+    if value == u64::MAX || origin == u64::MAX {
+        None
+    } else {
+        Some((i128::from(value) - i128::from(origin)) / 1000)
+    }
+}
 
 const MAX_LINES: usize = 320;
 
@@ -39,13 +64,15 @@ pub struct Context {
 impl Context {
     /// 固定メタデータと経過時間を各行に付ける。
     pub fn line(self, stage: &'static str, detail: fmt::Arguments<'_>) -> String {
+        let elapsed = self.started.elapsed();
         format!(
-            "req={} key={} app={} stage={} ms={} {}",
+            "req={} key={} app={} stage={} ms={} mono_us={} {}",
             self.id,
             if self.register { "F2" } else { "F1" },
             self.app.name(),
             stage,
-            self.started.elapsed().as_millis(),
+            elapsed.as_millis(),
+            elapsed.as_micros(),
             detail
         )
     }
@@ -136,5 +163,15 @@ mod tests {
             .last()
             .unwrap()
             .contains("result=failed stopped=false truncated=true"));
+    }
+    /// 共通時計は実測 Instant の差と一致し、粗いtickと混ぜない。
+    #[test]
+    fn monotonic_offsets_share_the_request_origin() {
+        initialize_clock();
+        let start = Instant::now();
+        let end = start + std::time::Duration::from_micros(19500);
+        assert_eq!(relative_mono_us(mono_ns(end), mono_ns(start)), Some(19500));
+        assert_eq!(relative_mono_us(mono_ns(start), mono_ns(end)), Some(-19500));
+        assert_eq!(relative_mono_us(u64::MAX, 0), None);
     }
 }

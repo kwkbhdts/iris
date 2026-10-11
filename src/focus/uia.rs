@@ -577,8 +577,14 @@ impl Session {
         // 確認と SetFocus は不可分ではない。呼び出しは従来どおり一回のみ。
         app::trace_interventions(request, trace, "before_SetFocus", None);
         guard_for(trace, request, "SetFocus")?;
+        let set_started = Instant::now();
         let hr = (registered.element.vtable().SetFocus)(registered.element.as_raw());
         let set_completed = Instant::now();
+        trace.record(format_args!(
+            "api=SetFocus start_mono_us={} end_mono_us={}",
+            set_started.duration_since(request.started).as_micros(),
+            set_completed.duration_since(request.started).as_micros()
+        ));
         api(trace, "SetFocus", hr.ok())?;
         trace.record(format_args!(
             "api=SetFocus hr=0x{:08X} result=success",
