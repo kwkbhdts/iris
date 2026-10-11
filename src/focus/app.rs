@@ -374,7 +374,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 pub fn run() {
     diagnostic::initialize_clock();
     if crate::DISCOVERY_ONLY {
-        println!("req=0 key=- app=- stage=start ms=0 build=discovery-readonly-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=discovery-readonly-v2 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else {
         println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v4 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     }

@@ -154,6 +154,7 @@ struct Survey<'a> {
     automation: &'a IUIAutomation2,
     reference: IUIAutomationElement,
     identity: Identity,
+    reference_is_edit: bool,
     request: Request,
     trace: &'a mut Trace,
     visited: usize,
@@ -263,7 +264,7 @@ impl Session {
             app::STOP.load(Ordering::SeqCst),
         )
     }
-    /// 正解の祖先とルート全体を別々に観測し、登録や移動はしない。
+    /// 観測したフォーカスの祖先とルートを調べ、非Editも正解扱いせず列挙へ進む。
     fn inspect(&self, request: Request, trace: &mut Trace) -> Result<()> {
         if request.context.app != App::ChatGpt {
             return Err("unsupported_app");
@@ -293,18 +294,29 @@ impl Session {
             kind.0,
             kind == UIA_EditControlTypeId
         ));
-        if kind != UIA_EditControlTypeId {
-            return Err("reference_not_edit");
-        }
-        if !attributes(&reference, request, trace)? {
-            return Err("reference_not_eligible");
-        }
-        let reference_identity = identity(&reference, request, trace)?;
+        let reference_is_edit = kind == UIA_EditControlTypeId;
         trace.record(format_args!(
-            "automation_id_present={:?} class_name_present={:?} raw_strings_omitted=true",
-            reference_identity.id.as_ref().map(|v| !v.is_empty()),
-            reference_identity.class.as_ref().map(|v| !v.is_empty())
+            "reference_role=observed_focus reference_is_edit={reference_is_edit} reference_identity_applicable={reference_is_edit} chat_input_identified=false"
         ));
+        // 非Editには編集属性や識別文字列を要求せず、型と祖先だけを記録する。
+        let reference_identity = if reference_is_edit {
+            if !attributes(&reference, request, trace)? {
+                return Err("reference_not_eligible");
+            }
+            let value = identity(&reference, request, trace)?;
+            trace.record(format_args!(
+                "automation_id_present={:?} class_name_present={:?} raw_strings_omitted=true",
+                value.id.as_ref().map(|v| !v.is_empty()),
+                value.class.as_ref().map(|v| !v.is_empty())
+            ));
+            value
+        } else {
+            trace.record(format_args!("reference_details=skipped_non_edit"));
+            Identity {
+                id: None,
+                class: None,
+            }
+        };
         let walker = read!(
             trace,
             request,
@@ -342,6 +354,7 @@ impl Session {
             automation: &self.automation,
             reference: reference.clone(),
             identity: reference_identity,
+            reference_is_edit,
             request,
             trace,
             visited: 0,
@@ -373,7 +386,7 @@ impl Session {
                 guard(request, survey.trace)
             });
         survey.trace.stage = "survey";
-        survey.trace.record(format_args!("complete={} reason={} visited={} edits={} candidates={} reference_matches={} id_matches={} class_matches={} identity_unknown={} unique_candidate={} chat_input_identified=false", result.is_ok(), result.as_ref().err().copied().unwrap_or("exhausted"), survey.visited, survey.edits, survey.candidates, survey.reference_matches, survey.id_matches, survey.class_matches, survey.identity_unknown, scan::unique(result.is_ok(), survey.candidates, survey.reference_matches)));
+        survey.trace.record(format_args!("complete={} reason={} visited={} edits={} candidates={} reference_matches={} id_matches={} class_matches={} identity_unknown={} reference_identity_applicable={} unique_candidate={} chat_input_identified=false", result.is_ok(), result.as_ref().err().copied().unwrap_or("exhausted"), survey.visited, survey.edits, survey.candidates, survey.reference_matches, survey.id_matches, survey.class_matches, survey.identity_unknown, survey.reference_is_edit, scan::unique(result.is_ok(), survey.reference_is_edit, survey.candidates, survey.reference_matches)));
         result.map(|_| ())
     }
 }

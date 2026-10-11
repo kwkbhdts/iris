@@ -64,8 +64,13 @@ pub fn walk<T: Tree>(
 }
 
 /// 診断上の一候補を、完了前や正解未検出時に一意と呼ばない。
-pub fn unique(complete: bool, candidates: usize, reference_matches: usize) -> bool {
-    complete && candidates == 1 && reference_matches == 1
+pub fn unique(
+    complete: bool,
+    reference_is_edit: bool,
+    candidates: usize,
+    reference_matches: usize,
+) -> bool {
+    complete && reference_is_edit && candidates == 1 && reference_matches == 1
 }
 
 #[cfg(test)]
@@ -139,6 +144,14 @@ mod tests {
         );
     }
 
+    /// 非Edit参照では列挙が完了しても入力欄との一意一致を主張しない。
+    #[test]
+    fn non_edit_reference_never_confirms_a_unique_input() {
+        assert!(!unique(true, false, 1, 0));
+        assert!(!unique(true, false, 1, 1));
+        assert!(unique(true, true, 1, 1));
+    }
+
     /// 最後の兄弟を見落とす上限と、子を見落とす上限は失敗にする。
     #[test]
     fn partial_traversal_never_becomes_unique() {
@@ -148,9 +161,9 @@ mod tests {
         };
         assert_eq!(walk(&mut tree, 0, 4, 3), Err("node_limit"));
         assert_eq!(walk(&mut tree, 0, 5, 2), Err("depth_limit"));
-        assert!(!unique(false, 1, 1));
-        assert!(!unique(true, 2, 1));
-        assert!(!unique(true, 1, 0));
-        assert!(unique(true, 1, 1));
+        assert!(!unique(false, true, 1, 1));
+        assert!(!unique(true, true, 2, 1));
+        assert!(!unique(true, true, 1, 0));
+        assert!(unique(true, true, 1, 1));
     }
 }
