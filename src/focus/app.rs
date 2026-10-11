@@ -166,6 +166,7 @@ fn refresh() {
     let current = foreground();
     let target = current
         .and_then(|w| identify(w).map(|app| (w, app)))
+        .filter(|&(_, app)| !crate::DISCOVERY_ONLY || app == App::ChatGpt)
         .filter(|_| foreground() == current);
     STATE.with(|s| {
         let mut borrow = s.borrow_mut();
@@ -281,7 +282,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     let key = &*(lparam as *const KBDLLHOOKSTRUCT);
     let index = if key.vkCode == VK_F1 as u32 {
         Some(0)
-    } else if key.vkCode == VK_F2 as u32 {
+    } else if !crate::DISCOVERY_ONLY && key.vkCode == VK_F2 as u32 {
         Some(1)
     } else {
         None
@@ -351,7 +352,11 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 fn worker(receiver: mpsc::Receiver<Request>) {
     match uia::Session::new() {
         Ok(mut session) => {
-            println!("req=0 key=- app=- stage=ready ms=0 F2=register F1=focus no_text_enter_ime_writes=true");
+            if crate::DISCOVERY_ONLY {
+                println!("req=0 key=- app=- stage=ready ms=0 F1=inspect ChatGPT_only=true no_focus_text_enter_ime_writes=true");
+            } else {
+                println!("req=0 key=- app=- stage=ready ms=0 F2=register F1=focus no_text_enter_ime_writes=true");
+            }
             while let Ok(request) = receiver.recv() {
                 let report = session.execute(request);
                 println!("{report}");
@@ -368,7 +373,11 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 /// コンソールを開いて操作を待ち、Enter による終了時にフックを外す。
 pub fn run() {
     diagnostic::initialize_clock();
-    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v4 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+    if crate::DISCOVERY_ONLY {
+        println!("req=0 key=- app=- stage=start ms=0 build=discovery-readonly-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+    } else {
+        println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v4 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+    }
     unsafe {
         let class: Vec<u16> = "Iris.Tray.Window".encode_utf16().chain(Some(0)).collect();
         if !FindWindowW(class.as_ptr(), null_mut()).is_null() {

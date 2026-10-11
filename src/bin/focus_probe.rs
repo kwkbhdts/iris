@@ -1,4 +1,6 @@
 #[cfg(windows)]
+const DISCOVERY_ONLY: bool = false;
+#[cfg(windows)]
 #[path = "../focus/app.rs"]
 mod app;
 #[cfg(any(windows, test))]
