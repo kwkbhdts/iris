@@ -73,3 +73,15 @@ jobs:
           path: dist-discovery/*
           if-no-files-found: error
           retention-days: 14
+      - name: Build read-only ancestor path prototype
+        run: cargo build --locked --release --features focus-probe --bin iris-path-probe --target x86_64-pc-windows-msvc
+      - name: Package read-only ancestor path prototype
+        shell: pwsh
+        run: ./scripts/package-path.ps1
+      - name: Upload read-only ancestor path prototype
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iris-path-probe-windows-x64
+          path: dist-path/*
+          if-no-files-found: error
+          retention-days: 14

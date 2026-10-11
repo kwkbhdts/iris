@@ -352,7 +352,9 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 fn worker(receiver: mpsc::Receiver<Request>) {
     match uia::Session::new() {
         Ok(mut session) => {
-            if crate::DISCOVERY_ONLY {
+            if crate::PATH_ONLY {
+                println!("req=0 key=- app=- stage=ready ms=0 F1=inspect_path ChatGPT_only=true metadata_strings_visible=true review_before_sharing=true no_focus_text_enter_ime_writes=true");
+            } else if crate::DISCOVERY_ONLY {
                 println!("req=0 key=- app=- stage=ready ms=0 F1=inspect ChatGPT_only=true no_focus_text_enter_ime_writes=true");
             } else {
                 println!("req=0 key=- app=- stage=ready ms=0 F2=register F1=focus no_text_enter_ime_writes=true");
@@ -373,7 +375,9 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 /// コンソールを開いて操作を待ち、Enter による終了時にフックを外す。
 pub fn run() {
     diagnostic::initialize_clock();
-    if crate::DISCOVERY_ONLY {
+    if crate::PATH_ONLY {
+        println!("req=0 key=- app=- stage=start ms=0 build=path-readonly-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true local_display_only=true review_before_sharing=true console_Enter=exit");
+    } else if crate::DISCOVERY_ONLY {
         println!("req=0 key=- app=- stage=start ms=0 build=discovery-readonly-v2 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else {
         println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v4 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
