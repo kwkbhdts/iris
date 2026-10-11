@@ -203,9 +203,17 @@ fn worker(receiver: mpsc::Receiver<Request>) {
             println!("Ready: click the composer, F2 to register; F1 to return. No text/Enter/IME writes.");
             while let Ok(request) = receiver.recv() {
                 let result = session.execute(request);
-                match result {
-                    Ok(message) => println!("{message}"),
-                    Err(message) => println!("FAILED: {message}; register again with F2"),
+                // タイマーの次回発火より先に戻った期限切れも無効化する。
+                if request.started.elapsed().as_millis() >= policy::BUDGET_MS {
+                    STOP.store(true, Ordering::SeqCst);
+                }
+                if STOP.load(Ordering::SeqCst) {
+                    eprintln!("Stopped or timed out: close and restart; an in-flight focus change cannot be undone.");
+                } else {
+                    match result {
+                        Ok(message) => println!("{message}"),
+                        Err(message) => println!("FAILED: {message}; register again with F2"),
+                    }
                 }
                 BUSY.store(false, Ordering::SeqCst);
             }
