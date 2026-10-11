@@ -60,15 +60,25 @@ fn init<T>(name: &'static str, result: windows::core::Result<T>) -> Result<T> {
 
 /// 追加診断の前にも既存の前面・介入・期限条件を守る。
 fn guard(trace: &mut Trace, request: Request) -> Result<()> {
-    app::check(request).inspect_err(|reason| {
-        trace.record(format_args!("result=guard_failed reason={reason}"));
+    guard_for(trace, request, "non_api_check")
+}
+
+/// 失敗時だけ、予定APIと判定に使った世代までの原因記録を付ける。
+fn guard_for(trace: &mut Trace, request: Request, planned_api: &'static str) -> Result<()> {
+    app::check(request).map_err(|failure| {
+        trace.record(format_args!(
+            "result=guard_failed reason={} planned_api={planned_api}",
+            failure.reason
+        ));
+        app::trace_interventions(request, trace, "guard_failed", Some(failure.epoch));
+        failure.reason
     })
 }
 
 // UIA 呼び出し直前の確認を省略せず、失敗時には呼び出し名を付ける。
 macro_rules! call {
     ($trace:expr, $request:expr, $name:literal, $operation:expr) => {{
-        guard($trace, $request)?;
+        guard_for($trace, $request, $name)?;
         api($trace, $name, $operation)
     }};
 }
@@ -80,7 +90,7 @@ unsafe fn parent(
     trace: &mut Trace,
     request: Request,
 ) -> Result<Option<IUIAutomationElement>> {
-    guard(trace, request)?;
+    guard_for(trace, request, "GetParentElement")?;
     let mut raw = null_mut();
     let hr = (walker.vtable().GetParentElement)(walker.as_raw(), element.as_raw(), &mut raw);
     api(trace, "GetParentElement", hr.ok())?;
@@ -128,6 +138,7 @@ impl Session {
             "registration={:?}",
             self.registration.as_ref().map(|r| r.id)
         ));
+        app::trace_interventions(request, &mut trace, "request_begin", None);
         let result = unsafe { self.perform(request, &mut trace) };
         if let Err(reason) = result {
             let failed_stage = trace.stage;
@@ -564,7 +575,8 @@ impl Session {
         trace.record(format_args!("same_registered={same_registered}"));
         trace.stage = "focus.set";
         // 確認と SetFocus は不可分ではない。呼び出しは従来どおり一回のみ。
-        guard(trace, request)?;
+        app::trace_interventions(request, trace, "before_SetFocus", None);
+        guard_for(trace, request, "SetFocus")?;
         let hr = (registered.element.vtable().SetFocus)(registered.element.as_raw());
         let set_completed = Instant::now();
         api(trace, "SetFocus", hr.ok())?;

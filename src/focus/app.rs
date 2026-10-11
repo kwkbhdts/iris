@@ -1,5 +1,6 @@
 use crate::{
-    diagnostic::{App, Context},
+    diagnostic::{App, Context, Trace},
+    intervention::{self, Events, Kind},
     logic::{Decision, F1State},
     policy, uia,
 };
@@ -7,18 +8,18 @@ use std::{
     cell::RefCell,
     ptr::null_mut,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
     },
     time::Instant,
 };
 use windows_sys::Win32::{
     Foundation::*,
-    System::{LibraryLoader::GetModuleHandleW, Threading::*},
+    System::{LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount, Threading::*},
     UI::{Accessibility::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-pub static EPOCH: AtomicU64 = AtomicU64::new(0);
+static EVENTS: Events = Events::EMPTY;
 pub static STOP: AtomicBool = AtomicBool::new(false);
 static BUSY: AtomicBool = AtomicBool::new(false);
 
@@ -33,6 +34,7 @@ pub struct Request {
     pub context: Context,
     pub window: Window,
     pub epoch: u64,
+    pub start_tick: u32,
     pub started: Instant,
     pub register: bool,
 }
@@ -83,12 +85,19 @@ fn modifiers() -> bool {
         .any(|&key| unsafe { GetAsyncKeyState(key as i32) } < 0)
 }
 
-/// UIA 呼び出しの間ごとに前面・介入・期限を確認する。
-pub fn check(request: Request) -> Result<(), &'static str> {
+/// 失敗理由と、判定時に実際に観測した世代を保持する。
+pub struct CheckFailure {
+    pub reason: &'static str,
+    pub epoch: u64,
+}
+
+/// 判定に実際に用いた世代を失敗理由と一緒に返す。
+pub fn check(request: Request) -> Result<(), CheckFailure> {
     let same_window = foreground() == Some(request.window);
-    let same_epoch = EPOCH.load(Ordering::SeqCst) == request.epoch;
+    let epoch = EVENTS.epoch();
+    let same_epoch = epoch == request.epoch;
     let elapsed = request.started.elapsed().as_millis();
-    if STOP.load(Ordering::SeqCst) {
+    let result = if STOP.load(Ordering::SeqCst) {
         Err("stopped")
     } else if !policy::valid(same_window, same_epoch, elapsed) {
         Err(if !same_window {
@@ -102,6 +111,37 @@ pub fn check(request: Request) -> Result<(), &'static str> {
         Err("modifier_down")
     } else {
         Ok(())
+    };
+    result.map_err(|reason| CheckFailure { reason, epoch })
+}
+
+/// 要求開始との差を観測済みの世代まで記録し、後着イベントを原因に混ぜない。
+pub fn trace_interventions(
+    request: Request,
+    trace: &mut Trace,
+    point: &'static str,
+    end: Option<u64>,
+) {
+    let end = end.unwrap_or_else(|| EVENTS.epoch());
+    let snapshot = EVENTS.snapshot(request.epoch, end);
+    let mut counts = [0u64; intervention::KIND_COUNT];
+    let mut injected = 0;
+    for event in &snapshot.events {
+        counts[event.kind as usize] += 1;
+        if event.injected {
+            injected += 1;
+        }
+    }
+    trace.record(format_args!("intervention_point={point} start_epoch={} observed_epoch={end} epoch_delta={:?} missing={} counts_complete={} detail_omitted={}", request.epoch, snapshot.total, snapshot.missing, snapshot.total.is_some() && snapshot.missing == 0, snapshot.events.len().saturating_sub(8)));
+    trace.record(format_args!("intervention_point={point} foreground={} mouse_move={} mouse_button={} mouse_wheel={} mouse_other={} keyboard_other_or_injected={} new_F1_F2_request={} watchdog={} injected={injected}", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7]));
+    for event in snapshot
+        .events
+        .iter()
+        .skip(snapshot.events.len().saturating_sub(8))
+    {
+        let same_request_window = (event.kind == Kind::Foreground && event.window != 0)
+            .then_some(event.window == request.window.hwnd);
+        trace.record(format_args!("intervention_point={point} event_epoch={} kind={} injected={} event_since_request_ms={} received_since_request_ms={} delivery_delay_ms={} same_request_window={same_request_window:?} attribution=unknown", event.epoch, event.kind.label(), event.injected, intervention::relative_tick(event.event_tick, request.start_tick), intervention::relative_tick(event.received_tick, request.start_tick), event.received_tick.wrapping_sub(event.event_tick)));
     }
 }
 
@@ -124,7 +164,8 @@ fn refresh() {
         if BUSY.load(Ordering::SeqCst) && !state.timed_out && expired {
             state.timed_out = true;
             STOP.store(true, Ordering::SeqCst);
-            EPOCH.fetch_add(1, Ordering::SeqCst);
+            let tick = unsafe { GetTickCount() };
+            EVENTS.record(Kind::Watchdog, false, tick, tick, 0);
             if let Some(request) = state.active {
                 eprintln!(
                     "{}",
@@ -144,13 +185,19 @@ fn refresh() {
 unsafe extern "system" fn foreground_event(
     _: HWINEVENTHOOK,
     _: u32,
-    _: HWND,
+    window: HWND,
     _: i32,
     _: i32,
     _: u32,
-    _: u32,
+    event_tick: u32,
 ) {
-    EPOCH.fetch_add(1, Ordering::SeqCst);
+    EVENTS.record(
+        Kind::Foreground,
+        false,
+        event_tick,
+        GetTickCount(),
+        window as usize,
+    );
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.target = None;
@@ -161,7 +208,22 @@ unsafe extern "system" fn foreground_event(
 /// マウス操作の内容を記録せず、介入だけを数える。
 unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
-        EPOCH.fetch_add(1, Ordering::SeqCst);
+        // 座標やボタン値をコピーせず、種別・注入フラグ・時刻だけを読む。
+        let data = lparam as *const MSLLHOOKSTRUCT;
+        let kind = match wparam as u32 {
+            WM_MOUSEMOVE => Kind::MouseMove,
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+            | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => Kind::MouseButton,
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => Kind::MouseWheel,
+            _ => Kind::MouseOther,
+        };
+        EVENTS.record(
+            kind,
+            (*data).flags & LLMHF_INJECTED != 0,
+            (*data).time,
+            GetTickCount(),
+            0,
+        );
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
 }
@@ -180,7 +242,13 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         None
     };
     if key.flags & LLKHF_INJECTED != 0 || index.is_none() {
-        EPOCH.fetch_add(1, Ordering::SeqCst);
+        EVENTS.record(
+            Kind::KeyboardOther,
+            key.flags & LLKHF_INJECTED != 0,
+            key.time,
+            GetTickCount(),
+            0,
+        );
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
     let down = matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
@@ -197,7 +265,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         let decision = state.keys[index.unwrap()].event(down, eligible, false);
         if decision == Decision::Send {
             // 別の操作キーも前の処理を中止し、処理中には予約を追加しない。
-            let epoch = EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+            let start_tick = GetTickCount();
+            let epoch = EVENTS.record(Kind::NewShortcut, false, key.time, start_tick, 0);
             if !BUSY.swap(true, Ordering::SeqCst) {
                 let (window, app) = target.unwrap();
                 let started = Instant::now();
@@ -212,6 +281,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     context,
                     window,
                     epoch,
+                    start_tick,
                     started,
                     register: index == Some(1),
                 };
@@ -250,7 +320,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 
 /// コンソールを開いて操作を待ち、Enter による終了時にフックを外す。
 pub fn run() {
-    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v2 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+    println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v3 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     unsafe {
         let class: Vec<u16> = "Iris.Tray.Window".encode_utf16().chain(Some(0)).collect();
         if !FindWindowW(class.as_ptr(), null_mut()).is_null() {
