@@ -1,7 +1,7 @@
 use crate::{
     app::{self, Request},
     diagnostic::{App, Trace},
-    policy, rules,
+    policy, post_cancel, rules,
 };
 use std::{
     sync::atomic::Ordering,
@@ -43,6 +43,8 @@ struct Outcome {
     immediate: &'static str,
     late: &'static str,
     interrupted: bool,
+    post_cancel_observation: &'static str,
+    post_cancel_reason: &'static str,
 }
 impl Default for Outcome {
     /// 未実施と未確認を成功から分離する。
@@ -54,6 +56,8 @@ impl Default for Outcome {
             immediate: "unknown",
             late: "not_run",
             interrupted: false,
+            post_cancel_observation: "not_run",
+            post_cancel_reason: "not_applicable",
         }
     }
 }
@@ -140,7 +144,7 @@ impl Session {
             outcome.interrupted = true;
         }
         trace.stage = "summary";
-        trace.record(format_args!("search={} revalidated={} set_focus={} immediate_focus={} late_focus={} interrupted={} reason={} no_text_enter_ime_writes=true", outcome.search, outcome.revalidated, outcome.set_focus, outcome.immediate, outcome.late, outcome.interrupted, result.as_ref().err().copied().unwrap_or("none")));
+        trace.record(format_args!("search={} revalidated={} set_focus={} immediate_focus={} late_focus={} interrupted={} reason={} post_cancel_observation={} post_cancel_reason={} no_text_enter_ime_writes=true", outcome.search, outcome.revalidated, outcome.set_focus, outcome.immediate, outcome.late, outcome.interrupted, result.as_ref().err().copied().unwrap_or("none"), outcome.post_cancel_observation, outcome.post_cancel_reason));
         let observed = outcome.immediate == "match" || outcome.late == "match";
         let label = if outcome.interrupted {
             "INTERRUPTED"
@@ -543,10 +547,30 @@ impl Session {
             completed.duration_since(request.started).as_micros(),
             hr.0 as u32
         ));
+        // 元の操作結果を固定し、条件付き観測の成否では上書きしない。
+        let result = (|| {
+            guard(request, trace, outcome)?;
+            api(trace, "SetFocus", hr.ok())?;
+            self.after_focus(&target.element, completed, request, trace, outcome)
+        })();
+        if outcome.interrupted && outcome.set_focus == "returned_ok" {
+            self.post_cancel(&target.element, request, trace, outcome);
+        }
+        result
+    }
+
+    /// 通常の事後観測。失効した要求では呼び出しを続けない。
+    fn after_focus(
+        &self,
+        target: &IUIAutomationElement,
+        completed: Instant,
+        request: Request,
+        trace: &mut Trace,
+        outcome: &mut Outcome,
+    ) -> Result<()> {
         guard(request, trace, outcome)?;
-        api(trace, "SetFocus", hr.ok())?;
         trace.stage = "focus.immediate";
-        let matched = self.observe(&target.element, request, trace, outcome)?;
+        let matched = self.observe(target, request, trace, outcome)?;
         outcome.immediate = if matched { "match" } else { "mismatch" };
         trace.record(format_args!("matches_target={matched}"));
         if matched {
@@ -567,7 +591,7 @@ impl Session {
                 std::thread::sleep(Duration::from_millis(wait));
             }
             trace.stage = "focus.late";
-            let matched = self.observe(&target.element, request, trace, outcome)?;
+            let matched = self.observe(target, request, trace, outcome)?;
             outcome.late = if matched { "match" } else { "mismatch" };
             trace.record(format_args!(
                 "target_offset_ms={offset} since_set_ms={} matches_target={matched}",
@@ -578,5 +602,73 @@ impl Session {
             }
         }
         guard(request, trace, outcome)
+    }
+
+    /// 中断を維持したまま一組だけ読み取り、結果を別欄へ記録する。
+    fn post_cancel(
+        &self,
+        target: &IUIAutomationElement,
+        request: Request,
+        trace: &mut Trace,
+        outcome: &mut Outcome,
+    ) {
+        trace.stage = "post_cancel";
+        outcome.post_cancel_observation = "unknown";
+        let (epoch, snapshot) = app::read_only_snapshot(request);
+        if !post_cancel::foreground_only(&snapshot) {
+            outcome.post_cancel_reason = "history_not_foreground_only_or_incomplete";
+            return;
+        }
+        trace.record(format_args!("observation_epoch={epoch} original_epoch={} original_operation=interrupted foreground_events={}", request.epoch, snapshot.events.len()));
+        let mut reader = PostCancelReader {
+            session: self,
+            target,
+            request,
+            epoch,
+            trace,
+        };
+        match post_cancel::once(&mut reader) {
+            Ok(same) => {
+                outcome.post_cancel_observation = if same { "match" } else { "mismatch" };
+                outcome.post_cancel_reason = "observed";
+            }
+            Err(reason) => {
+                outcome.post_cancel_reason = reason;
+            }
+        }
+        trace.record(format_args!(
+            "post_cancel_observation={} reason={} original_operation=interrupted",
+            outcome.post_cancel_observation, outcome.post_cancel_reason
+        ));
+    }
+}
+
+struct PostCancelReader<'a> {
+    session: &'a Session,
+    target: &'a IUIAutomationElement,
+    request: Request,
+    epoch: u64,
+    trace: &'a mut Trace,
+}
+impl post_cancel::Reader for PostCancelReader<'_> {
+    type Element = IUIAutomationElement;
+    /// 観測開始時の世代と元の前面・期限・停止状態を検証する。
+    fn check(&mut self) -> Result<()> {
+        app::check_read_only(self.request, self.epoch)
+    }
+    /// フォーカス取得は一回だけで、変更APIは呼ばない。
+    fn focused(&mut self) -> Result<Self::Element> {
+        api(self.trace, "GetFocusedElement(post_cancel)", unsafe {
+            self.session.automation.GetFocusedElement()
+        })
+    }
+    /// 既に選択済みの要素との同一性を一回だけ照会する。
+    fn matches(&mut self, element: &Self::Element) -> Result<bool> {
+        api(self.trace, "CompareElements(post_cancel)", unsafe {
+            self.session
+                .automation
+                .CompareElements(self.target, element)
+        })
+        .map(|same| same.as_bool())
     }
 }

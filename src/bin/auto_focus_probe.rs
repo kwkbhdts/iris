@@ -23,6 +23,9 @@ mod logic;
 #[allow(dead_code)]
 mod policy;
 #[cfg(any(windows, test))]
+#[path = "../auto_focus/post_cancel.rs"]
+mod post_cancel;
+#[cfg(any(windows, test))]
 #[path = "../auto_focus/rules.rs"]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod rules;

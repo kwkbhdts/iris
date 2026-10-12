@@ -115,6 +115,37 @@ pub fn check(request: Request) -> Result<(), CheckFailure> {
     result.map_err(|reason| CheckFailure { reason, epoch })
 }
 
+/// 原要求を変更せず、観測開始候補の世代と既知の履歴を返す。
+#[allow(dead_code)]
+pub fn read_only_snapshot(request: Request) -> (u64, intervention::Snapshot) {
+    let epoch = EVENTS.epoch();
+    (epoch, EVENTS.snapshot(request.epoch, epoch))
+}
+
+/// 独立読み取り専用の世代を検証し、原要求の失効状態は書き換えない。
+#[allow(dead_code)]
+pub fn check_read_only(request: Request, observation_epoch: u64) -> Result<(), &'static str> {
+    if STOP.load(Ordering::SeqCst) {
+        return Err("stopped");
+    }
+    if EVENTS.epoch() != observation_epoch {
+        return Err("new_intervention");
+    }
+    if foreground() != Some(request.window) {
+        return Err("foreground_changed");
+    }
+    if request.started.elapsed().as_millis() >= policy::BUDGET_MS {
+        return Err("deadline_exceeded");
+    }
+    if modifiers() {
+        return Err("modifier_down");
+    }
+    if EVENTS.epoch() != observation_epoch {
+        return Err("new_intervention");
+    }
+    Ok(())
+}
+
 /// 要求開始との差を観測済みの世代まで記録し、後着イベントを原因に混ぜない。
 pub fn trace_interventions(
     request: Request,
@@ -378,7 +409,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 pub fn run() {
     diagnostic::initialize_clock();
     if crate::AUTO_FOCUS {
-        println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v1 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v2 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else if crate::PATH_ONLY {
         println!("req=0 key=- app=- stage=start ms=0 build=path-readonly-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true local_display_only=true review_before_sharing=true console_Enter=exit");
     } else if crate::DISCOVERY_ONLY {
