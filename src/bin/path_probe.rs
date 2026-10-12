@@ -1,4 +1,8 @@
 #[cfg(windows)]
+const AUTO_SEND: bool = false;
+#[cfg(windows)]
+const OWN_INPUT: Option<fn(bool, usize) -> bool> = None;
+#[cfg(windows)]
 const AUTO_FOCUS: bool = false;
 #[cfg(windows)]
 const PATH_ONLY: bool = true;

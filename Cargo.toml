@@ -29,6 +29,11 @@ name = "iris-auto-focus-probe"
 path = "src/bin/auto_focus_probe.rs"
 required-features = ["focus-probe"]
 
+[[bin]]
+name = "iris-auto-send-probe"
+path = "src/bin/auto_send_probe.rs"
+required-features = ["focus-probe"]
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", optional = true, features = ["Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_Accessibility"] }
 windows-sys = { version = "=0.61.2", features = [

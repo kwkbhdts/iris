@@ -185,7 +185,7 @@ fn key_input(vk: u16, scan: u16, flags: u32) -> INPUT {
     }
 }
 
-struct ImeBackend {
+pub struct ImeBackend {
     snapshot: Snapshot,
     epoch: u64,
     ime: WindowId,
@@ -328,6 +328,35 @@ fn prepare_and_run(request: Request) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// オート試作の検証後に新しいWin32フォーカスを取得し、既存バックエンドを準備する。
+#[allow(dead_code)]
+pub fn prepare_auto(target: WindowId) -> Result<ImeBackend, &'static str> {
+    let request = capture(target, unsafe { GetTickCount() });
+    let focus = request
+        .snapshot
+        .focus
+        .map_err(|_| "focus_snapshot_failed")?;
+    if focus.pid != target.pid {
+        return Err("focus_process_changed");
+    }
+    let ime =
+        window_id(unsafe { ImmGetDefaultIMEWnd(focus.hwnd as HWND) }).map_err(|_| "ime_unknown")?;
+    let layout = unsafe { GetKeyboardLayout(focus.tid) } as usize;
+    if layout == 0 || ime.pid != focus.pid || ime.tid != focus.tid {
+        return Err("ime_owner_or_layout_unknown");
+    }
+    let mut backend = ImeBackend {
+        snapshot: request.snapshot,
+        epoch: request.epoch,
+        ime,
+        layout,
+    };
+    if !backend.guarded() {
+        return Err("fresh_snapshot_invalid");
+    }
+    Ok(backend)
 }
 
 /// UI 側の期限確認にも同じ基準を使う。

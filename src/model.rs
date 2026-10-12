@@ -1,6 +1,6 @@
 use super::types::ImeReply;
 
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const RESTORE_DELAY_MS: u32 = 100;
 pub const DEADLINE_MS: u32 = 500;
 pub const INPUT_COUNT: u32 = 6;
