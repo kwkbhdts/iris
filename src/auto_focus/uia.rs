@@ -554,7 +554,7 @@ impl Session {
             self.after_focus(&target.element, completed, request, trace, outcome)
         })();
         if outcome.interrupted && outcome.set_focus == "returned_ok" {
-            self.post_cancel(&target.element, request, trace, outcome);
+            self.post_cancel(&target.element, completed, request, trace, outcome);
         }
         result
     }
@@ -604,10 +604,11 @@ impl Session {
         guard(request, trace, outcome)
     }
 
-    /// 中断を維持したまま一組だけ読み取り、結果を別欄へ記録する。
+    /// 中断と観測世代を固定し、即時不一致の場合だけ遅延観測を追加する。
     fn post_cancel(
         &self,
         target: &IUIAutomationElement,
+        set_completed: Instant,
         request: Request,
         trace: &mut Trace,
         outcome: &mut Outcome,
@@ -620,20 +621,51 @@ impl Session {
             return;
         }
         trace.record(format_args!("observation_epoch={epoch} original_epoch={} original_operation=interrupted foreground_events={}", request.epoch, snapshot.events.len()));
-        let mut reader = PostCancelReader {
-            session: self,
-            target,
-            request,
-            epoch,
-            trace,
-        };
-        match post_cancel::once(&mut reader) {
-            Ok(same) => {
-                outcome.post_cancel_observation = if same { "match" } else { "mismatch" };
-                outcome.post_cancel_reason = "observed";
-            }
-            Err(reason) => {
-                outcome.post_cancel_reason = reason;
+        for (sample_index, offset) in [0, 50, 150].into_iter().enumerate() {
+            // 全サンプルで同じepochを使い、待機中も原要求の期限を延長しない。
+            let result = (|| {
+                loop {
+                    app::check_read_only(request, epoch)?;
+                    let wait = policy::observation_wait(
+                        request.started.elapsed().as_millis(),
+                        set_completed.elapsed().as_millis(),
+                        offset,
+                    )
+                    .ok_or("observation_budget")?;
+                    if wait == 0 {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(wait));
+                }
+                let sample_start_us = set_completed.elapsed().as_micros();
+                let mut reader = PostCancelReader {
+                    session: self,
+                    target,
+                    request,
+                    epoch,
+                    trace,
+                };
+                let sample = post_cancel::once(&mut reader)?;
+                let sample_end_us = set_completed.elapsed().as_micros();
+                trace.record(format_args!("sample={sample_index} target_offset_ms={offset} clock=since_SetFocus_return sample_start_us={sample_start_us} sample_end_us={sample_end_us} actual_control_type={} matches_target={} observation_epoch={epoch} original_operation=interrupted", sample.control_type, sample.matched));
+                Ok(sample)
+            })();
+            match result {
+                Ok(sample) => {
+                    outcome.post_cancel_observation =
+                        if sample.matched { "match" } else { "mismatch" };
+                    outcome.post_cancel_reason = "observed";
+                    // 即時一致なら追加照会なし。不一致なら50/150msをそれぞれ記録する。
+                    if sample_index == 0 && sample.matched {
+                        break;
+                    }
+                }
+                Err(reason) => {
+                    outcome.post_cancel_observation = "unknown";
+                    outcome.post_cancel_reason = reason;
+                    trace.record(format_args!("sample={sample_index} target_offset_ms={offset} sample_incomplete=true since_set_us={} observation_epoch={epoch} reason={reason}", set_completed.elapsed().as_micros()));
+                    break;
+                }
             }
         }
         trace.record(format_args!(
@@ -656,11 +688,18 @@ impl post_cancel::Reader for PostCancelReader<'_> {
     fn check(&mut self) -> Result<()> {
         app::check_read_only(self.request, self.epoch)
     }
-    /// フォーカス取得は一回だけで、変更APIは呼ばない。
+    /// 各サンプルのフォーカス取得は一回だけで、変更APIは呼ばない。
     fn focused(&mut self) -> Result<Self::Element> {
         api(self.trace, "GetFocusedElement(post_cancel)", unsafe {
             self.session.automation.GetFocusedElement()
         })
+    }
+    /// 取得した実フォーカスの型だけを読み、内容は取得しない。
+    fn control_type(&mut self, element: &Self::Element) -> Result<i32> {
+        api(self.trace, "ControlType(post_cancel)", unsafe {
+            element.CurrentControlType()
+        })
+        .map(|kind| kind.0)
     }
     /// 既に選択済みの要素との同一性を一回だけ照会する。
     fn matches(&mut self, element: &Self::Element) -> Result<bool> {

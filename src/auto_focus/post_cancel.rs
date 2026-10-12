@@ -12,22 +12,34 @@ pub fn foreground_only(snapshot: &Snapshot) -> bool {
             .all(|event| event.observation.kind == Kind::Foreground)
 }
 
-/// 操作を再開する能力を持たない、二つの読み取りだけの観測口。
+/// 操作を再開する能力を持たない、フォーカス・型・同一性の読み取りだけの観測口。
 pub trait Reader {
     type Element;
     fn check(&mut self) -> Result<()>;
     fn focused(&mut self) -> Result<Self::Element>;
+    fn control_type(&mut self, element: &Self::Element) -> Result<i32>;
     fn matches(&mut self, element: &Self::Element) -> Result<bool>;
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Sample {
+    pub control_type: i32,
+    pub matched: bool,
+}
+
 /// API前・間・後を確認し、一組だけ観測する。途中の変化は一致を返さない。
-pub fn once(reader: &mut impl Reader) -> Result<bool> {
+pub fn once(reader: &mut impl Reader) -> Result<Sample> {
     reader.check()?;
     let element = reader.focused()?;
     reader.check()?;
+    let control_type = reader.control_type(&element)?;
+    reader.check()?;
     let matched = reader.matches(&element)?;
     reader.check()?;
-    Ok(matched)
+    Ok(Sample {
+        control_type,
+        matched,
+    })
 }
 
 #[cfg(test)]
@@ -88,6 +100,8 @@ mod tests {
         fail_check: usize,
         gets: usize,
         compares: usize,
+        types: usize,
+        type_error: bool,
         get_error: bool,
         compare_error: bool,
     }
@@ -109,6 +123,14 @@ mod tests {
                 Ok(())
             }
         }
+        fn control_type(&mut self, _: &()) -> Result<i32> {
+            self.types += 1;
+            if self.type_error {
+                Err("type_error")
+            } else {
+                Ok(50004)
+            }
+        }
         fn matches(&mut self, _: &()) -> Result<bool> {
             self.compares += 1;
             if self.compare_error {
@@ -124,6 +146,8 @@ mod tests {
             fail_check,
             gets: 0,
             compares: 0,
+            types: 0,
+            type_error: false,
             get_error: false,
             compare_error: false,
         }
@@ -131,14 +155,22 @@ mod tests {
     /// 新介入・期限・停止の検出位置によらず、見かけの一致を返さない。
     #[test]
     fn changes_before_between_and_after_calls_discard_match() {
-        for (failure, gets, compares) in [(1, 0, 0), (2, 1, 0), (3, 1, 1)] {
+        for (failure, gets, types, compares) in
+            [(1, 0, 0, 0), (2, 1, 0, 0), (3, 1, 1, 0), (4, 1, 1, 1)]
+        {
             let mut f = fake(failure);
             assert_eq!(once(&mut f), Err("changed"));
-            assert_eq!((f.gets, f.compares), (gets, compares));
+            assert_eq!((f.gets, f.types, f.compares), (gets, types, compares));
         }
         let mut f = fake(0);
-        assert_eq!(once(&mut f), Ok(true));
-        assert_eq!((f.gets, f.compares, f.checks), (1, 1, 3));
+        assert_eq!(
+            once(&mut f),
+            Ok(Sample {
+                control_type: 50004,
+                matched: true
+            })
+        );
+        assert_eq!((f.gets, f.types, f.compares, f.checks), (1, 1, 1, 4));
     }
     /// API失敗時には再試行や不要な次の読み取りをしない。
     #[test]
@@ -147,6 +179,10 @@ mod tests {
         f.get_error = true;
         assert_eq!(once(&mut f), Err("get_error"));
         assert_eq!((f.gets, f.compares), (1, 0));
+        let mut f = fake(0);
+        f.type_error = true;
+        assert_eq!(once(&mut f), Err("type_error"));
+        assert_eq!((f.gets, f.types, f.compares), (1, 1, 0));
         let mut f = fake(0);
         f.compare_error = true;
         assert_eq!(once(&mut f), Err("compare_error"));

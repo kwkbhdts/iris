@@ -1,10 +1,10 @@
-# Iris 登録不要フォーカス試作 v2
+# Iris 登録不要フォーカス試作 v3
 
 `iris-auto-focus-probe.exe` は ChatGPT Desktop内dotsの通常画面を対象に、本文から **F1で入力欄へ戻る**独立した試作です。F2登録は不要で、毎回探索します。**文字入力・Enter送信・IME変更はしません。** 通常の手動送信版Irisとは別のexeです。Windows実機は未検証です。
 
 ## 最初の一回
 
-1. 通常版と古い試作を終了し、このexeを通常権限で起動。`build=auto-focus-v2` と `stage=ready` を確認します。
+1. 通常版と古い試作を終了し、このexeを通常権限で起動。`build=auto-focus-v3` と `stage=ready` を確認します。
 2. ChatGPT Desktop内dotsの通常会話を開き、入力欄が空・IME未確定文字なしを確認して**会話本文をクリック**します。
 3. マウスを止めて修飾キーなしの **F1を一回押して離し、約2秒無操作**で待ちます。F2は押しません。
 4. その後コンソールへ戻り、起動行から `stage=end` までコピーし、目視で入力欄に戻ったかを添えてください。
@@ -47,26 +47,36 @@ SetFocus直後に不一致で介入がない場合だけ、完了から約50ms�
 
 既存v4ではDesktopでSetFocus中に同一プロセスの前面通知がありました。**今回もそれを一括で無視せず、世代リセットもしません。** 例えば目視で戻っても `set_focus=returned_ok / immediate_focus=unknown / interrupted=true / result=INTERRUPTED` になる可能性があります。これは呼び出し後の安全確認を中止した意味で、「動かなかった」とは断定しません。未確認は成功表示にせず、観測が不一致のままなら `FOCUS_UNCONFIRMED` です。
 
-## v2の中断後の独立観測
+## v3の中断後の独立観測
 
 v1の初回実機では、登録なし探索・直前再検証が一意で成功し、SetFocusの成功応答後に目視移動が確認されました。一方、前面通知2件で機械的な事後確認は中断しました。これを自己誘発と断定したり、前面通知を無視したりはしません。
 
-v2は元の操作を `INTERRUPTED` のまま固定し、次の条件を全て満たす場合だけ、独立の読み取り観測を最大一組実行します。
+v3は元の操作を `INTERRUPTED` のまま固定し、次の条件を全て満たす場合だけ独立の読み取り観測を開始します。
 
 - SetFocusが成功応答を返し、元の要求が介入等で中断している。
 - 原要求開始から観測開始候補の世代まで、既知イベントが1件以上あり、前面通知だけで、欠落・範囲不明がない。キー・マウス・新要求・watchdogの混入は不可。
 - 現在の前面HWND/PID/TIDが元と一致し、停止なし・修飾キーなし・元の1500ms総期限内。
 
-観測専用の世代を別に保持し、`GetFocusedElement`と選択済み要素への`CompareElements`を一回ずつ呼びます。API前・間・後に、観測専用世代、現在の前面、停止、期限、修飾キーを再確認します。観測開始後の新しい前面通知も中止理由です。原要求の世代を書き換えず、SetFocus再実行・送信・後続操作への復帰・観測の再試行はしません。UIAの200ms設定も変更しません。
+観測専用の世代を一度だけ別に保持します。即時サンプルでは `GetFocusedElement`、取得した要素の `CurrentControlType`、選択済み要素への `CompareElements` を各一回呼びます。即時一致ならそこで終了し、**即時不一致の場合だけ約50ms・150msの最大2回を追加**します。50msで一致しても150msの観測は行い、それぞれの結果を残します。API前・間・後に、観測専用世代、現在の前面、停止、期限、修飾キーを再確認します。全サンプルと待機中に同じ観測世代を使います。待機は5ms以下に区切って確認し、観測開始後の新しい前面通知も中止理由です。原要求の世代を書き換えず、SetFocus再実行・送信・後続操作への復帰・観測の再試行はしません。UIAの200ms設定も変更しません。
 
-`stage=summary` に `post_cancel_observation=not_run / unknown / match / mismatch` と `post_cancel_reason` を追加します。条件不成立・API失敗・新介入では `unknown` です。一致しても最終結果は `INTERRUPTED` のままです。例えば次は正常に成立し得ます。
+`stage=summary` に `post_cancel_observation=not_run / unknown / match / mismatch` と `post_cancel_reason` を追加します。条件不成立・API失敗・新介入・残り期限不足では `unknown` となり、以降の観測は行いません。summaryの値は最後に完了した観測結果で、途中打ち切りならunknownです。それ以前の時点の結果は各サンプル行に残ります。一致しても最終結果は `INTERRUPTED` のままです。例えば次は正常に成立し得ます。
 
 ```text
 search=unique revalidated=true set_focus=returned_ok immediate_focus=unknown late_focus=not_run interrupted=true reason=input_or_foreground_intervention post_cancel_observation=match post_cancel_reason=observed
 result=INTERRUPTED stopped=false
 ```
 
-`observation_epoch` は独立観測だけの基準であり、原要求の再有効化ではありません。観測はその時点のUIA一致を示すだけで、不可分な状態取得や将来のフォーカス維持、送信先の保証には使えません。UIA呼び出し中は取消できませんが、戻った後の確認に失敗すれば一致結果を採用しません。v2のWindows実機動作は未検証です。
+時刻基準は**元のSetFocus呼び出しが戻ったInstant**です。`target_offset_ms=0 / 50 / 150` は目標時刻、`sample_start_us / sample_end_us` はこの基準からの実測マイクロ秒です。即時は追加待機なしという意味で、0msちょうどとは限りません。目標を過ぎていれば追加待機せず読み、1500msの元の総期限は延長しません。`actual_control_type` は実フォーカスの数値型、`matches_target` は選択済み要素との比較結果です。API失敗や新介入時は部分結果を確定せず `sample_incomplete=true` と理由を残します。
+
+v2ではSetFocus応答の約3ms後に独立観測が不一致、目視では移動成功でした。今回の遅延観測はその反映時刻を調べるもので、Firefoxでの過去の遅延一致をDesktopへ一般化したものではありません。例えば次の形で3時点を確認します（値は形式例で、実測ではありません）。
+
+```text
+sample=0 target_offset_ms=0 clock=since_SetFocus_return sample_start_us=3000 sample_end_us=4000 actual_control_type=50026 matches_target=false observation_epoch=351 original_operation=interrupted
+sample=1 target_offset_ms=50 clock=since_SetFocus_return sample_start_us=50000 sample_end_us=52000 actual_control_type=50004 matches_target=true observation_epoch=351 original_operation=interrupted
+sample=2 target_offset_ms=150 clock=since_SetFocus_return sample_start_us=150000 sample_end_us=152000 actual_control_type=50004 matches_target=true observation_epoch=351 original_operation=interrupted
+```
+
+`observation_epoch` は独立観測だけの基準であり、原要求の再有効化ではありません。観測はその時点のUIA一致を示すだけで、不可分な状態取得や将来のフォーカス維持、送信先の保証には使えません。UIA呼び出し中は取消できませんが、戻った後の確認に失敗すれば一致結果を採用しません。v3のWindows実機動作は未検証です。
 
 ## 取得する情報と開発
 

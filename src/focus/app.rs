@@ -409,7 +409,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 pub fn run() {
     diagnostic::initialize_clock();
     if crate::AUTO_FOCUS {
-        println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v2 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v3 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else if crate::PATH_ONLY {
         println!("req=0 key=- app=- stage=start ms=0 build=path-readonly-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true local_display_only=true review_before_sharing=true console_Enter=exit");
     } else if crate::DISCOVERY_ONLY {
