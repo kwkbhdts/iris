@@ -3,6 +3,7 @@ use crate::{
     logic::{Decision, F1State, Pending},
     model,
     types::WindowId,
+    warning::Warning,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -15,7 +16,10 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::*,
-    System::{LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount},
+    System::{
+        DataExchange::*, LibraryLoader::GetModuleHandleW, Memory::*,
+        SystemInformation::GetTickCount,
+    },
     UI::{Accessibility::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
@@ -24,6 +28,8 @@ const WM_SEND: u32 = WM_APP + 2;
 const WM_REFRESH: u32 = WM_APP + 3;
 const TOGGLE: u32 = 1;
 const EXIT: u32 = 2;
+const ABOUT: u32 = 3;
+const COPY_VERSION: u32 = 4;
 const REFRESH: usize = 1;
 const POLL: usize = 2;
 const ICON_APP: usize = 101;
@@ -69,11 +75,11 @@ fn update<R>(change: impl FnOnce(&mut State) -> R) -> R {
 }
 
 /// 初期化または入力・復元を確認できない理由を表示する。
-fn error(text: &str) {
+fn error(warning: Warning) {
     unsafe {
         MessageBoxW(
             null_mut(),
-            wide(text).as_ptr(),
+            wide(&warning.display()).as_ptr(),
             wide("Iris").as_ptr(),
             MB_OK | MB_ICONERROR,
         );
@@ -81,14 +87,14 @@ fn error(text: &str) {
 }
 
 /// 無効化と表示を一緒に行い、通知中に再開させない。
-fn report_error(text: &str) {
+fn report_error(warning: Warning) {
     ime::STOP.store(true, Ordering::SeqCst);
     update(|s| {
         s.enabled = false;
         s.notifying = true;
     });
     tray(NIM_MODIFY);
-    error(text);
+    error(warning);
     update(|s| s.notifying = false);
 }
 
@@ -207,7 +213,10 @@ fn enqueue(id: usize) {
         update(|s| {
             s.pending.finish(id);
         });
-        report_error("入力処理を開始できないため Iris を無効にしました。送信していません。");
+        report_error(Warning::new(
+            "IRIS-W001",
+            "入力処理を開始できないため Iris を無効にしました。送信していません。",
+        ));
     }
 }
 
@@ -240,7 +249,7 @@ fn finish_exit(uncertain: bool) {
         KillTimer(STATE.get().window, REFRESH);
     }
     if uncertain {
-        error("処理完了・IME 復元を確認できません。入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。");
+        error(Warning::new("IRIS-W003", "処理完了・IME 復元を確認できません。入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。"));
     }
     unsafe {
         PostQuitMessage(0);
@@ -258,7 +267,7 @@ fn poll() {
     for result in replies {
         if update(|s| s.pending.finish(result.id)) {
             let warning = result.warning.or(if STATE.get().timed_out {
-                Some("処理が期限を超えたため Iris を無効にしました。入力・送信結果、キー状態、IME を手動確認してください。")
+                Some(Warning::new("IRIS-W002", "処理が期限を超えたため Iris を無効にしました。入力・送信結果、キー状態、IME を手動確認してください。"))
             } else { None });
             if let Some(warning) = warning {
                 report_error(warning);
@@ -336,11 +345,43 @@ fn notify_timeout() {
         ..Default::default()
     };
     let title = wide("Iris: 処理・復元が未確認");
-    let message = wide("期限を超えたため無効にしました。入力・送信結果、キー状態、IME を手動確認してください。自動再送はしません。");
+    let message = format!(
+        "IRIS-W002: 期限超過・結果未確認。入力・キー状態・IMEを手動確認。自動再送なし。\n{}",
+        crate::build_info::ID
+    );
     data.szInfoTitle[..title.len()].copy_from_slice(&title);
-    data.szInfo[..message.len()].copy_from_slice(&message);
+    data.szInfo = crate::warning::balloon(&message);
     unsafe {
         Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+}
+
+/// 明示的なメニュー操作時だけ、固定のビルド情報をクリップボードへ渡す。
+fn copy_version(window: HWND) -> bool {
+    let text = wide(&crate::build_info::display());
+    unsafe {
+        let memory = GlobalAlloc(GMEM_MOVEABLE, text.len() * size_of::<u16>());
+        if memory.is_null() {
+            return false;
+        }
+        let pointer = GlobalLock(memory) as *mut u16;
+        if pointer.is_null() {
+            GlobalFree(memory);
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(text.as_ptr(), pointer, text.len());
+        GlobalUnlock(memory);
+        if OpenClipboard(window) == 0 {
+            GlobalFree(memory);
+            return false;
+        }
+        // CF_UNICODETEXT。成功時は Windows へ所有権が移る。
+        let copied = EmptyClipboard() != 0 && !SetClipboardData(13, memory).is_null();
+        CloseClipboard();
+        if !copied {
+            GlobalFree(memory);
+        }
+        copied
     }
 }
 
@@ -372,6 +413,18 @@ fn menu(window: HWND) {
             TOGGLE as usize,
             wide("有効").as_ptr(),
         );
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            ABOUT as usize,
+            wide("バージョン情報").as_ptr(),
+        );
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            COPY_VERSION as usize,
+            wide("バージョン情報をコピー").as_ptr(),
+        );
         AppendMenuW(menu, MF_STRING, EXIT as usize, wide("終了").as_ptr());
 
         let mut point = POINT::default();
@@ -390,6 +443,22 @@ fn menu(window: HWND) {
         PostMessageW(window, WM_NULL, 0, 0);
 
         match command as u32 {
+            ABOUT => {
+                MessageBoxW(
+                    window,
+                    wide(&crate::build_info::display()).as_ptr(),
+                    wide("Iris: バージョン情報").as_ptr(),
+                    MB_OK | MB_ICONINFORMATION,
+                );
+            }
+            COPY_VERSION => {
+                if !copy_version(window) {
+                    error(Warning::new(
+                        "IRIS-U001",
+                        "バージョン情報をコピーできませんでした。",
+                    ));
+                }
+            }
             TOGGLE => {
                 // メニュー中に失敗通知が来ても、「無効にする」を再有効化へ反転させない。
                 if STATE.get().closing_at.is_none()
@@ -471,11 +540,14 @@ impl Drop for Resources {
 }
 
 /// 隠しウィンドウ・作業スレッド・フック・通知領域を作る。
-fn start() -> Result<(), &'static str> {
+fn start() -> Result<(), Warning> {
     unsafe {
         let class = wide("Iris.Tray.Window");
         if !FindWindowW(class.as_ptr(), null_mut()).is_null() || ime::other_iris_running() {
-            return Err("他の Iris（通常版・診断版・試験版）を終了してから起動してください。");
+            return Err(Warning::new(
+                "IRIS-S001",
+                "他の Iris（通常版・診断版・試験版）を終了してから起動してください。",
+            ));
         }
         let instance = GetModuleHandleW(null_mut());
         let definition = WNDCLASSW {
@@ -486,7 +558,10 @@ fn start() -> Result<(), &'static str> {
             ..Default::default()
         };
         if RegisterClassW(&definition) == 0 {
-            return Err("ウィンドウの登録に失敗しました。");
+            return Err(Warning::new(
+                "IRIS-S002",
+                "ウィンドウの登録に失敗しました。",
+            ));
         }
         let mut resources = Resources {
             window: CreateWindowExW(
@@ -508,7 +583,10 @@ fn start() -> Result<(), &'static str> {
             events: [null_mut(); 2],
         };
         if resources.window.is_null() {
-            return Err("ウィンドウの作成に失敗しました。");
+            return Err(Warning::new(
+                "IRIS-S003",
+                "ウィンドウの作成に失敗しました。",
+            ));
         }
         update(|s| {
             s.window = resources.window;
@@ -526,7 +604,7 @@ fn start() -> Result<(), &'static str> {
                     }
                 }
             })
-            .map_err(|_| "作業スレッドを開始できませんでした。")?;
+            .map_err(|_| Warning::new("IRIS-S004", "作業スレッドを開始できませんでした。"))?;
         WORKER.with(|cell| {
             *cell.borrow_mut() = Some(Worker {
                 requests: tx,
@@ -555,18 +633,24 @@ fn start() -> Result<(), &'static str> {
             || resources.keyboard.is_null()
             || resources.mouse.is_null()
         {
-            return Err("入力フックの登録に失敗しました。");
+            return Err(Warning::new(
+                "IRIS-S005",
+                "入力フックの登録に失敗しました。",
+            ));
         }
         if SetTimer(resources.window, REFRESH, 200, None) == 0
             || SetTimer(resources.window, POLL, 50, None) == 0
             || !tray(NIM_ADD)
         {
-            return Err("通知領域またはタイマーの初期化に失敗しました。");
+            return Err(Warning::new(
+                "IRIS-S006",
+                "通知領域またはタイマーの初期化に失敗しました。",
+            ));
         }
         let mut message = MSG::default();
         loop {
             match GetMessageW(&mut message, null_mut(), 0, 0) {
-                -1 => return Err("メッセージ取得に失敗しました。処理中だった場合は入力・送信結果、キー状態、IME を手動確認してください。"),
+                -1 => return Err(Warning::new("IRIS-S007", "メッセージ取得に失敗しました。処理中だった場合は入力・送信結果、キー状態、IME を手動確認してください。")),
                 0 => break,
                 _ => { TranslateMessage(&message); DispatchMessageW(&message); }
             }

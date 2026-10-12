@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+& "$PSScriptRoot/verify-version.ps1" -Path "target/x86_64-pc-windows-msvc/release/iris-focus-probe.exe"
+
 # 試作を通常版とは別の配布物にまとめる。
 New-Item -ItemType Directory -Force dist-focus | Out-Null
 Copy-Item target/x86_64-pc-windows-msvc/release/iris-focus-probe.exe dist-focus/

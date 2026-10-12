@@ -42,6 +42,28 @@ pub struct Outcome {
     pub input: Option<InputReply>,
 }
 
+impl Outcome {
+    /// 既存の停止段階を安定したコードへ写し、アプリ側の送信結果は推測しない。
+    pub fn diagnostic(&self) -> &'static str {
+        match self.status {
+            "original_unknown; no_input_or_change" => "IRIS-I101",
+            "off_request_unconfirmed; no_input" => "IRIS-I102",
+            "off_not_confirmed_or_guard_failed; no_input" => "IRIS-I103",
+            "input_partial_or_failed; no_retry; restore_skipped" => "IRIS-I104",
+            "guard_changed_after_input; manual_check" => "IRIS-I105",
+            "restore_skipped; guard_failed_or_state_unknown" => "IRIS-I106",
+            "restore_request_unconfirmed" => "IRIS-I107",
+            "restore_readback_unconfirmed" => "IRIS-I108",
+            "skipped_before_change"
+            | "input_skipped; original_off; unchanged"
+            | "input_skipped; legacy_restored; actual_tsf_state_unknown"
+            | "input_enqueued; original_off; no_ime_write; app_result_unknown"
+            | "input_enqueued; legacy_restored; app_and_tsf_result_unknown" => "IRIS-I000",
+            _ => "IRIS-I999",
+        }
+    }
+}
+
 /// 元の応答0/1を分岐し、入力一回と条件付き復元だけを実行する。
 pub fn run(backend: &mut impl Backend) -> Outcome {
     let mut out = Outcome {
@@ -120,6 +142,7 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
     if !matches!(restored, ImeReply::Raw(0)) || !backend.guarded() {
         return out;
     }
+    out.status = "restore_readback_unconfirmed";
     let after = backend.read_open();
     if matches!(after, ImeReply::Raw(1)) && backend.guarded() {
         out.manual = false;
@@ -362,5 +385,44 @@ mod tests {
         let start = u32::MAX - 20;
         assert!(within_deadline(start, start.wrapping_add(500)));
         assert!(!within_deadline(start, start.wrapping_add(501)));
+    }
+
+    /// 失敗を起こした段階ごとに固定コードを返し、投入・復元の呼出しは増やさない。
+    #[test]
+    fn diagnostics_identify_ime_stages() {
+        for (index, code) in [
+            (0, "IRIS-I101"),
+            (1, "IRIS-I102"),
+            (2, "IRIS-I103"),
+            (3, "IRIS-I106"),
+            (4, "IRIS-I107"),
+            (5, "IRIS-I108"),
+        ] {
+            let mut f = Fake::on();
+            f.replies[index] = ImeReply::Failed(1460);
+            let result = run(&mut f);
+            assert_eq!(result.diagnostic(), code);
+            assert!(f.events.iter().filter(|&&e| e == "send").count() <= 1);
+        }
+        let mut f = Fake::on();
+        f.input.inserted = 3;
+        assert_eq!(run(&mut f).diagnostic(), "IRIS-I104");
+    }
+
+    /// 全入力投入後の確認不能を未送信や再送可能と扱わない。
+    #[test]
+    fn diagnostics_after_input_do_not_assert_send_failure() {
+        let mut f = Fake::off();
+        f.fail_check = 4;
+        let r = run(&mut f);
+        assert_eq!(r.diagnostic(), "IRIS-I105");
+        assert_eq!(r.input.unwrap().inserted, INPUT_COUNT);
+        assert_eq!(f.events, ["send"]);
+        let mut f = Fake::on();
+        f.replies[5] = ImeReply::Failed(0);
+        let r = run(&mut f);
+        assert_eq!(r.diagnostic(), "IRIS-I108");
+        assert_eq!(r.input.unwrap().inserted, INPUT_COUNT);
+        assert_eq!(f.events, ["off", "send", "restore_wait", "on"]);
     }
 }

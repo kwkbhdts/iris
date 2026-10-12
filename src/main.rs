@@ -1,5 +1,9 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod build_info;
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
 #[cfg(windows)]
 mod ime;
 #[cfg(any(windows, test))]
@@ -9,6 +13,8 @@ mod model;
 #[cfg(any(windows, test))]
 #[allow(dead_code)]
 mod types;
+#[cfg(any(windows, test))]
+mod warning;
 #[cfg(windows)]
 mod windows;
 

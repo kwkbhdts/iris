@@ -32,7 +32,7 @@ pub struct Request {
 }
 pub struct Completion {
     pub id: usize,
-    pub warning: Option<&'static str>,
+    pub warning: Option<crate::warning::Warning>,
 }
 
 /// F1 時点のウィンドウ識別情報だけを取り、重い処理は作業スレッドへ回す。
@@ -297,19 +297,27 @@ pub fn execute(request: Request) -> Completion {
 }
 
 /// IME の所有者とレイアウトを取得し、比較版と同じ手順で入力・復元する。
-fn prepare_and_run(request: Request) -> Option<&'static str> {
+fn prepare_and_run(request: Request) -> Option<crate::warning::Warning> {
+    use crate::warning::Warning;
     let Ok(focus) = request.snapshot.focus else {
-        return Some("入力フォーカスを確認できないため送信せず、Iris を無効にしました。");
+        return Some(Warning::new(
+            "IRIS-P001",
+            "入力フォーカスを確認できないため送信せず、Iris を無効にしました。",
+        ));
     };
     let ime = window_id(unsafe { ImmGetDefaultIMEWnd(focus.hwnd as HWND) });
     let Ok(ime) = ime else {
-        return Some("IME の状態を取得できないため送信せず、Iris を無効にしました。");
+        return Some(Warning::new(
+            "IRIS-P002",
+            "IME の状態を取得できないため送信せず、Iris を無効にしました。",
+        ));
     };
     let layout = unsafe { GetKeyboardLayout(focus.tid) } as usize;
     if layout == 0 || ime.pid != focus.pid || ime.tid != focus.tid {
-        return Some(
+        return Some(Warning::new(
+            "IRIS-P003",
             "IME の所属またはレイアウトを確認できないため送信せず、Iris を無効にしました。",
-        );
+        ));
     }
     let mut backend = ImeBackend {
         snapshot: request.snapshot,
@@ -319,12 +327,12 @@ fn prepare_and_run(request: Request) -> Option<&'static str> {
     };
     let result = model::run(&mut backend);
     if result.manual {
-        Some("入力または IME 復元を確認できないため Iris を無効にしました。\n入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。自動再送はしません。")
+        Some(Warning::new(result.diagnostic(), "入力または IME 復元を確認できないため Iris を無効にしました。\n入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。自動再送はしません。"))
     } else if matches!(
         result.status,
         "original_unknown; no_input_or_change" | "off_not_confirmed_or_guard_failed; no_input"
     ) {
-        Some("IME オフを確認できないため送信せず、Iris を無効にしました。\n対象の入力欄と IME を確認してください。")
+        Some(Warning::new(result.diagnostic(), "IME オフを確認できないため送信せず、Iris を無効にしました。\n対象の入力欄と IME を確認してください。"))
     } else {
         None
     }

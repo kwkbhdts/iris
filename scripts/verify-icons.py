@@ -63,7 +63,7 @@ def read_pe(data):
             ids = path + (name,)
             if target & 0x80000000:
                 walk(target & 0x7FFFFFFF, ids)
-            elif ids[0] in (3, 14):
+            elif ids[0] in (3, 14, 16):
                 assert len(ids) == 3 and ids[2] == 0
                 entry = base + target
                 start, size = offset(u32(data, entry)), u32(data, entry + 4)

@@ -1,4 +1,7 @@
 #[cfg(windows)]
+#[path = "../build_info.rs"]
+mod build_info;
+#[cfg(windows)]
 const AUTO_SEND: bool = false;
 #[cfg(windows)]
 const OWN_INPUT: Option<fn(bool, usize) -> bool> = None;

@@ -1,4 +1,11 @@
 #[cfg(windows)]
+#[path = "../build_info.rs"]
+mod build_info;
+#[cfg(windows)]
+#[path = "../warning.rs"]
+#[allow(dead_code)]
+mod warning;
+#[cfg(windows)]
 const AUTO_SEND: bool = true;
 #[cfg(windows)]
 const OWN_INPUT: Option<fn(bool, usize) -> bool> = Some(is_own_input);

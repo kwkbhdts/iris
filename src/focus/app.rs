@@ -412,6 +412,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
 
 /// コンソールを開いて操作を待ち、Enter による終了時にフックを外す。
 pub fn run() {
+    println!("Iris build: {}", crate::build_info::ID);
     diagnostic::initialize_clock();
     if crate::AUTO_SEND {
         println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v1 sends_OK_Enter=true provisional_dots_rule=true stop_normal_iris_first=true console_Enter=exit");

@@ -664,8 +664,10 @@ impl Session {
         outcome.manual = result.manual;
         trace.stage = "input.result";
         trace.record(format_args!(
-            "ime_status={} manual_check={} app_send_result=unknown",
-            result.status, result.manual
+            "diagnostic={} ime_status={} manual_check={} app_send_result=unknown",
+            result.diagnostic(),
+            result.status,
+            result.manual
         ));
         if result.manual
             || outcome.verification_failed

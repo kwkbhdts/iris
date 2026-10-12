@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+& "$PSScriptRoot/verify-version.ps1" -Path "target/x86_64-pc-windows-msvc/release/iris.exe"
+
 # ビルドに使用した Rust のライセンス原文を配布物に含める。
 $sysroot = (& rustc --print sysroot).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'rustc sysroot lookup failed' }
