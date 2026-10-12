@@ -26,6 +26,8 @@ const TOGGLE: u32 = 1;
 const EXIT: u32 = 2;
 const REFRESH: usize = 1;
 const POLL: usize = 2;
+const ICON_APP: usize = 101;
+const ICON_TRAY: usize = 102;
 
 #[derive(Clone, Copy)]
 struct State {
@@ -296,9 +298,22 @@ fn tray(action: u32) -> bool {
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
         uCallbackMessage: WM_TRAY,
-        hIcon: unsafe { LoadIconW(null_mut(), IDI_APPLICATION) },
+        // LR_SHARED のアイコンはプロセスが所有し、個別には破棄しない。
+        hIcon: unsafe {
+            LoadImageW(
+                GetModuleHandleW(null_mut()),
+                ICON_TRAY as *const u16,
+                IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON),
+                GetSystemMetrics(SM_CYSMICON),
+                LR_SHARED,
+            ) as HICON
+        },
         ..Default::default()
     };
+    if action != NIM_DELETE && data.hIcon.is_null() {
+        return false;
+    }
     let tip = wide(if state.timed_out && state.pending.current().is_some() {
         "Iris: 無効・処理未確認（手動確認が必要）"
     } else if state.enabled {
@@ -466,6 +481,7 @@ fn start() -> Result<(), &'static str> {
         let definition = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
+            hIcon: LoadIconW(instance, ICON_APP as *const u16),
             lpszClassName: class.as_ptr(),
             ..Default::default()
         };

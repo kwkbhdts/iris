@@ -24,6 +24,8 @@ jobs:
         run: cargo +1.99.0 fmt --check
       - name: Run logic tests
         run: cargo +1.99.0 test --locked --features focus-probe
+      - name: Verify source icon resources
+        run: python scripts/verify-icons.py
 
   windows:
     name: Build Windows x64 executable
@@ -39,6 +41,8 @@ jobs:
           rustup default 1.99.0
       - name: Build executable with static CRT
         run: cargo build --locked --release --bin iris --target x86_64-pc-windows-msvc
+      - name: Verify embedded icon resources
+        run: python scripts/verify-icons.py target/x86_64-pc-windows-msvc/release/iris.exe
       - name: Package executable and notices
         shell: pwsh
         run: ./scripts/package.ps1
