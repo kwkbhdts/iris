@@ -1,4 +1,5 @@
 use crate::{
+    model::guard::{EpochEvidence, EventKind, Evidence, Reason},
     model::{self, Backend, InputReply, DEADLINE_MS, RESTORE_DELAY_MS},
     types::*,
 };
@@ -18,12 +19,19 @@ use windows_sys::Win32::{
 };
 
 pub static EPOCH: AtomicU64 = AtomicU64::new(0);
+static EPOCH_EVIDENCE: EpochEvidence = EpochEvidence::EMPTY;
 pub static ABORT: AtomicBool = AtomicBool::new(false);
 // 無効化・終了は新規入力を止めるが、条件が保たれた復元は妨げない。
 pub static STOP: AtomicBool = AtomicBool::new(false);
 const QUERY_TIMEOUT_MS: u32 = 50;
 const IMC_GETOPENSTATUS: usize = 0x0005;
 const IMC_SETOPENSTATUS: usize = 0x0006;
+
+/// 元の世代加算を維持し、診断用にイベントの分類だけを添える。
+pub fn invalidate(kind: EventKind) {
+    let epoch = EPOCH.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    EPOCH_EVIDENCE.record(epoch, kind);
+}
 
 #[derive(Clone, Copy)]
 pub struct Request {
@@ -107,8 +115,28 @@ fn focused(foreground: WindowId) -> Result<WindowId, u32> {
 
 /// F1 前後の前面とフォーカスが一致するか確認する。
 fn unchanged(snapshot: Snapshot) -> bool {
+    unchanged_reason(snapshot).is_ok()
+}
+
+/// 同じ取得順・同じ比較条件で、既に取得した不一致だけを分類する。
+fn unchanged_reason(snapshot: Snapshot) -> Result<(), Reason> {
     let foreground = window_id(unsafe { GetForegroundWindow() });
-    foreground == snapshot.foreground && foreground.and_then(focused) == snapshot.focus
+    if foreground != snapshot.foreground {
+        return Err(if foreground.is_err() || snapshot.foreground.is_err() {
+            Reason::ForegroundUnknown
+        } else {
+            Reason::ForegroundChanged
+        });
+    }
+    let focus = foreground.and_then(focused);
+    if focus != snapshot.focus {
+        return Err(if focus.is_err() || snapshot.focus.is_err() {
+            Reason::FocusUnknown
+        } else {
+            Reason::FocusChanged
+        });
+    }
+    Ok(())
 }
 
 /// 実行ファイルの末尾名だけを取得する。パスやプロセス内の入力内容は読まない。
@@ -190,37 +218,79 @@ pub struct ImeBackend {
     epoch: u64,
     ime: WindowId,
     layout: usize,
+    evidence: Evidence,
 }
+
+impl ImeBackend {
+    /// 不成立の理由だけを保存し、判定結果は変えない。
+    fn failed(&mut self, reason: Reason) -> bool {
+        self.evidence.current = reason;
+        false
+    }
+
+    /// 元の短絡順でフラグ・世代・期限を一回ずつ読む。
+    fn quick(&mut self) -> bool {
+        if ABORT.load(Ordering::SeqCst) {
+            return self.failed(Reason::Abort);
+        }
+        let epoch = EPOCH.load(Ordering::SeqCst);
+        if epoch != self.epoch {
+            return self.failed(EPOCH_EVIDENCE.observed(epoch));
+        }
+        if !model::within_deadline(self.snapshot.at, unsafe { GetTickCount() }) {
+            return self.failed(Reason::Deadline);
+        }
+        true
+    }
+}
+
 impl Backend for ImeBackend {
     /// 各操作の直前に、対象・レイアウト・期限・介入を再確認する。
     fn guarded(&mut self) -> bool {
-        let quick = || {
-            !ABORT.load(Ordering::SeqCst)
-                && EPOCH.load(Ordering::SeqCst) == self.epoch
-                && model::within_deadline(self.snapshot.at, unsafe { GetTickCount() })
-        };
-        if !quick()
-            || !unchanged(self.snapshot)
-            || other_iris_running()
-            || [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
-                .iter()
-                .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } < 0)
-        {
+        self.evidence.current = Reason::Unknown;
+        if !self.quick() {
             return false;
+        }
+        if let Err(reason) = unchanged_reason(self.snapshot) {
+            return self.failed(reason);
+        }
+        if other_iris_running() {
+            return self.failed(Reason::OtherIris);
+        }
+        if [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+            .iter()
+            .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } < 0)
+        {
+            return self.failed(Reason::ModifierDown);
         }
         let (Ok(fg), Ok(focus)) = (self.snapshot.foreground, self.snapshot.focus) else {
-            return false;
+            return self.failed(Reason::SnapshotUnknown);
         };
-        if !is_allowed(fg) || self.layout == 0 {
-            return false;
+        if !is_allowed(fg) {
+            return self.failed(Reason::TargetUnconfirmed);
+        }
+        if self.layout == 0 {
+            return self.failed(Reason::LayoutUnknown);
         }
         let ime = window_id(unsafe { ImmGetDefaultIMEWnd(focus.hwnd as HWND) });
-        ime == Ok(self.ime)
-            && self.ime.pid == focus.pid
-            && self.ime.tid == focus.tid
-            && unsafe { GetKeyboardLayout(focus.tid) } as usize == self.layout
-            && unchanged(self.snapshot)
-            && quick()
+        if ime != Ok(self.ime) {
+            return self.failed(Reason::ImeWindowChangedOrUnknown);
+        }
+        if self.ime.pid != focus.pid || self.ime.tid != focus.tid {
+            return self.failed(Reason::ImeOwnerMismatch);
+        }
+        if unsafe { GetKeyboardLayout(focus.tid) } as usize != self.layout {
+            return self.failed(Reason::LayoutChanged);
+        }
+        if let Err(reason) = unchanged_reason(self.snapshot) {
+            return self.failed(reason);
+        }
+        self.quick()
+    }
+
+    /// 待機で先に観測した不成立は、後続の中止フラグと区別して返す。
+    fn guard_evidence(&self) -> Evidence {
+        self.evidence
     }
     /// 終了要求では新規のオフだけを止め、条件が保たれれば復元する。
     fn closing(&self) -> bool {
@@ -269,6 +339,7 @@ impl Backend for ImeBackend {
         let start = unsafe { GetTickCount() };
         while unsafe { GetTickCount() }.wrapping_sub(start) < RESTORE_DELAY_MS {
             if !self.guarded() {
+                self.evidence.wait = Some(self.evidence.current);
                 ABORT.store(true, Ordering::SeqCst);
                 break;
             }
@@ -324,10 +395,11 @@ fn prepare_and_run(request: Request) -> Option<crate::warning::Warning> {
         epoch: request.epoch,
         ime,
         layout,
+        evidence: Evidence::UNKNOWN,
     };
     let result = model::run(&mut backend);
     if result.manual {
-        Some(Warning::new(result.diagnostic(), "入力または IME 復元を確認できないため Iris を無効にしました。\n入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。自動再送はしません。"))
+        Some(Warning::new(result.diagnostic(), "入力または IME 復元を確認できないため Iris を無効にしました。\n入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。自動再送はしません。").with_restore(result.restore))
     } else if matches!(
         result.status,
         "original_unknown; no_input_or_change" | "off_not_confirmed_or_guard_failed; no_input"
@@ -360,6 +432,7 @@ pub fn prepare_auto(target: WindowId) -> Result<ImeBackend, &'static str> {
         epoch: request.epoch,
         ime,
         layout,
+        evidence: Evidence::UNKNOWN,
     };
     if !backend.guarded() {
         return Err("fresh_snapshot_invalid");

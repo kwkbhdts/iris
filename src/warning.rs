@@ -2,20 +2,33 @@
 pub struct Warning {
     pub code: &'static str,
     pub text: &'static str,
+    pub restore: Option<crate::model::RestoreDiagnostic>,
 }
 
 impl Warning {
     /// 内容ではなく固定の診断段階だけを警告に添える。
     pub const fn new(code: &'static str, text: &'static str) -> Self {
-        Self { code, text }
+        Self {
+            code,
+            text,
+            restore: None,
+        }
+    }
+
+    /// 既存処理が返した診断だけを警告に付ける。
+    pub fn with_restore(mut self, restore: Option<crate::model::RestoreDiagnostic>) -> Self {
+        self.restore = restore;
+        self
     }
 
     /// ビルド時の識別子以外に、対象アプリの情報は付けない。
     pub fn display(self) -> String {
         format!(
-            "{}\n\n診断コード: {}\n{}",
+            "{}\n\n診断コード: {}{}\n{}",
             self.text,
             self.code,
+            self.restore
+                .map_or_else(String::new, |r| format!("\n診断詳細: {}", r.display())),
             crate::build_info::ID
         )
     }
@@ -56,5 +69,35 @@ mod tests {
         let result = balloon(&text);
         assert_eq!(result[254], 0);
         assert_eq!(result[255], 0);
+    }
+
+    /// I106 のサブコード・投入済みとビルドIDを同じ警告へ表示する。
+    #[test]
+    fn restore_detail_is_visible_without_claiming_application_success() {
+        use crate::model::{guard, InputReply, RestoreDiagnostic, RestoreStage};
+        let detail = RestoreDiagnostic {
+            stage: RestoreStage::BeforeGuard,
+            evidence: guard::Evidence {
+                current: guard::Reason::EpochInputLast,
+                wait: None,
+            },
+            reply: None,
+            input: Some(InputReply {
+                attempted: true,
+                inserted: 6,
+            }),
+        };
+        let text = Warning::new("IRIS-I106", "確認不能")
+            .with_restore(Some(detail))
+            .display();
+        for expected in [
+            "IRIS-I106-PRE",
+            "epoch_input_last",
+            "input=enqueued=6/6",
+            "app_send_result=unknown",
+            crate::build_info::ID,
+        ] {
+            assert!(text.contains(expected));
+        }
     }
 }

@@ -105,7 +105,7 @@ fn refresh() {
         .filter(|&w| ime::is_allowed(w))
         .filter(|_| ime::foreground() == current);
     if STATE.get().target != target {
-        ime::EPOCH.fetch_add(1, Ordering::SeqCst);
+        ime::invalidate(model::guard::EventKind::Target);
     }
     update(|s| s.target = target);
 }
@@ -127,7 +127,7 @@ unsafe extern "system" fn focus_event(
     _: u32,
     _: u32,
 ) {
-    ime::EPOCH.fetch_add(1, Ordering::SeqCst);
+    ime::invalidate(model::guard::EventKind::Focus);
     if event == EVENT_SYSTEM_FOREGROUND {
         update(|s| s.target = None);
         PostMessageW(STATE.get().window, WM_REFRESH, 0, 0);
@@ -137,7 +137,7 @@ unsafe extern "system" fn focus_event(
 /// マウス操作の内容は保存せず、介入だけを記録する。
 unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
-        ime::EPOCH.fetch_add(1, Ordering::SeqCst);
+        ime::invalidate(model::guard::EventKind::Input);
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
 }
@@ -153,7 +153,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
     if injected || key.vkCode != VK_F1 as u32 {
-        ime::EPOCH.fetch_add(1, Ordering::SeqCst);
+        ime::invalidate(model::guard::EventKind::Input);
         return CallNextHookEx(null_mut(), code, wparam, lparam);
     }
     let down = match wparam as u32 {

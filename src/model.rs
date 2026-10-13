@@ -1,5 +1,9 @@
 use super::types::ImeReply;
 
+#[path = "guard.rs"]
+#[allow(dead_code)]
+pub mod guard;
+
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const RESTORE_DELAY_MS: u32 = 100;
 pub const DEADLINE_MS: u32 = 500;
@@ -15,7 +19,7 @@ pub fn own_input(injected: bool, tag: usize, expected: usize) -> bool {
     injected && tag == expected
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct InputReply {
     pub attempted: bool,
     pub inserted: u32,
@@ -34,12 +38,71 @@ pub trait Backend {
     fn send_once(&mut self) -> InputReply;
     /// 入力後の復元だけの暫定待機。アプリの処理完了確認ではない。
     fn wait_before_restore(&mut self);
+    /// 再取得せず、直前の判定が残した診断だけを返す。
+    fn guard_evidence(&self) -> guard::Evidence {
+        guard::Evidence::UNKNOWN
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreStage {
+    BeforeGuard,
+    ReadUnknown,
+    ReadNonzero,
+    AfterGuard,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RestoreDiagnostic {
+    pub stage: RestoreStage,
+    pub evidence: guard::Evidence,
+    pub reply: Option<ImeReply>,
+    pub input: Option<InputReply>,
+}
+
+impl RestoreDiagnostic {
+    /// I106 のどの短絡分岐で止まったかを示す。
+    pub fn code(self) -> &'static str {
+        match self.stage {
+            RestoreStage::BeforeGuard => "IRIS-I106-PRE",
+            RestoreStage::ReadUnknown => "IRIS-I106-READ-UNKNOWN",
+            RestoreStage::ReadNonzero => "IRIS-I106-READ-NONZERO",
+            RestoreStage::AfterGuard => "IRIS-I106-POST",
+        }
+    }
+
+    /// 投入数と既に得た応答だけを表示し、送信成功は主張しない。
+    pub fn display(self) -> String {
+        let input = match self.input {
+            Some(r) if r.attempted => format!("enqueued={}/6", r.inserted),
+            _ => "not_attempted".into(),
+        };
+        let reply = match self.reply {
+            None => "not_read".into(),
+            Some(ImeReply::Raw(n)) => format!("raw:{n}"),
+            Some(ImeReply::Failed(n)) => format!("query_failed:{n}"),
+            Some(ImeReply::NotQueried) => "not_queried".into(),
+        };
+        let reason = match self.stage {
+            RestoreStage::ReadUnknown | RestoreStage::ReadNonzero => "not_evaluated",
+            _ => self.evidence.current.code(),
+        };
+        format!(
+            "{} guard={} wait_guard={} ime={} input={} app_send_result=unknown",
+            self.code(),
+            reason,
+            self.evidence.wait.map_or("none", guard::Reason::code),
+            reply,
+            input
+        )
+    }
 }
 
 pub struct Outcome {
     pub status: &'static str,
     pub manual: bool,
     pub input: Option<InputReply>,
+    pub restore: Option<RestoreDiagnostic>,
 }
 
 impl Outcome {
@@ -70,6 +133,7 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
         status: "skipped_before_change",
         manual: false,
         input: None,
+        restore: None,
     };
     if backend.closing() || !backend.guarded() {
         return out;
@@ -131,10 +195,35 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
     }
     out.status = "restore_skipped; guard_failed_or_state_unknown";
     if !backend.guarded() {
+        out.restore = Some(RestoreDiagnostic {
+            stage: RestoreStage::BeforeGuard,
+            evidence: backend.guard_evidence(),
+            reply: None,
+            input: out.input,
+        });
         return out;
     }
     let current = backend.read_open();
-    if !matches!(current, ImeReply::Raw(0)) || !backend.guarded() {
+    if !matches!(current, ImeReply::Raw(0)) {
+        out.restore = Some(RestoreDiagnostic {
+            stage: if matches!(current, ImeReply::Raw(_)) {
+                RestoreStage::ReadNonzero
+            } else {
+                RestoreStage::ReadUnknown
+            },
+            evidence: guard::Evidence::UNKNOWN,
+            reply: Some(current),
+            input: out.input,
+        });
+        return out;
+    }
+    if !backend.guarded() {
+        out.restore = Some(RestoreDiagnostic {
+            stage: RestoreStage::AfterGuard,
+            evidence: backend.guard_evidence(),
+            reply: Some(current),
+            input: out.input,
+        });
         return out;
     }
     out.status = "restore_request_unconfirmed";
@@ -170,6 +259,7 @@ mod tests {
         interrupt_on_wait: bool,
         fail_check: usize,
         checks: usize,
+        evidence: guard::Evidence,
     }
     impl Fake {
         /// オンからの一往復を用意する。
@@ -187,6 +277,7 @@ mod tests {
                 interrupt_on_wait: false,
                 fail_check: usize::MAX,
                 checks: 0,
+                evidence: guard::Evidence::UNKNOWN,
             }
         }
         /// 最初からオフの応答を用意する。
@@ -197,6 +288,9 @@ mod tests {
         }
     }
     impl Backend for Fake {
+        fn guard_evidence(&self) -> guard::Evidence {
+            self.evidence
+        }
         fn guarded(&mut self) -> bool {
             self.checks += 1;
             self.valid && self.checks < self.fail_check
@@ -424,5 +518,104 @@ mod tests {
         assert_eq!(r.diagnostic(), "IRIS-I108");
         assert_eq!(r.input.unwrap().inserted, INPUT_COUNT);
         assert_eq!(f.events, ["off", "send", "restore_wait", "on"]);
+    }
+
+    /// 復元前・読取後で判定回数と問い合わせ回数を維持する。
+    #[test]
+    fn restore_guard_detail_preserves_short_circuit_order() {
+        for (check, stage, remaining) in [
+            (5, RestoreStage::BeforeGuard, 3),
+            (6, RestoreStage::AfterGuard, 2),
+        ] {
+            let mut f = Fake::on();
+            f.fail_check = check;
+            f.evidence.current = guard::Reason::ForegroundChanged;
+            let result = run(&mut f);
+            let detail = result.restore.unwrap();
+            assert_eq!(result.diagnostic(), "IRIS-I106");
+            assert!(result.manual);
+            assert_eq!(detail.stage, stage);
+            assert_eq!(detail.evidence.current, guard::Reason::ForegroundChanged);
+            assert_eq!(f.checks, check);
+            assert_eq!(f.replies.len(), remaining);
+            assert_eq!(f.events, ["off", "send", "restore_wait"]);
+            assert!(detail.display().contains("enqueued=6/6"));
+            assert!(detail.display().contains("app_send_result=unknown"));
+        }
+    }
+
+    /// オフ以外・取得不能では後段ガードを呼ばず、応答を成功と解釈しない。
+    #[test]
+    fn restore_read_detail_skips_unevaluated_guard() {
+        for (reply, stage, text) in [
+            (ImeReply::Raw(1), RestoreStage::ReadNonzero, "raw:1"),
+            (ImeReply::Raw(2), RestoreStage::ReadNonzero, "raw:2"),
+            (
+                ImeReply::Failed(1460),
+                RestoreStage::ReadUnknown,
+                "query_failed:1460",
+            ),
+            (
+                ImeReply::NotQueried,
+                RestoreStage::ReadUnknown,
+                "not_queried",
+            ),
+        ] {
+            let mut f = Fake::on();
+            f.replies[3] = reply;
+            f.fail_check = 6;
+            let result = run(&mut f);
+            let detail = result.restore.unwrap();
+            assert_eq!(detail.stage, stage);
+            assert_eq!(f.checks, 5);
+            assert_eq!(f.replies.len(), 2);
+            assert_eq!(f.events, ["off", "send", "restore_wait"]);
+            assert!(detail.display().contains(text));
+            assert!(detail.display().contains("guard=not_evaluated"));
+        }
+    }
+
+    /// 待機中の理由は後の中止フラグに上書きされず、未投入も区別する。
+    #[test]
+    fn restore_detail_keeps_wait_evidence_and_skipped_input() {
+        let mut f = Fake::on();
+        f.interrupt_on_wait = true;
+        f.evidence = guard::Evidence {
+            current: guard::Reason::Abort,
+            wait: Some(guard::Reason::Deadline),
+        };
+        let result = run(&mut f);
+        let detail = result.restore.unwrap();
+        assert_eq!(detail.stage, RestoreStage::BeforeGuard);
+        assert!(detail
+            .display()
+            .contains("guard=abort_flag wait_guard=deadline"));
+        assert_eq!(f.events, ["off", "send", "restore_wait"]);
+
+        let mut f = Fake::on();
+        f.input.attempted = false;
+        f.input.inserted = 0;
+        f.fail_check = 5;
+        let result = run(&mut f);
+        assert!(result
+            .restore
+            .unwrap()
+            .display()
+            .contains("input=not_attempted"));
+        assert_eq!(f.events, ["off", "send"]);
+    }
+
+    /// 他の診断コードや正常な復元に I106 の詳細を付けない。
+    #[test]
+    fn restore_detail_is_scoped_to_i106() {
+        for index in [0, 1, 2, 4, 5] {
+            let mut f = Fake::on();
+            f.replies[index] = ImeReply::Failed(0);
+            assert!(run(&mut f).restore.is_none());
+        }
+        let mut f = Fake::on();
+        assert!(run(&mut f).restore.is_none());
+        let mut f = Fake::off();
+        assert!(run(&mut f).restore.is_none());
     }
 }

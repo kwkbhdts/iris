@@ -663,6 +663,9 @@ impl Session {
         outcome.input = result.input;
         outcome.manual = result.manual;
         trace.stage = "input.result";
+        if let Some(detail) = result.restore {
+            trace.record(format_args!("{}", detail.display()));
+        }
         trace.record(format_args!(
             "diagnostic={} ime_status={} manual_check={} app_send_result=unknown",
             result.diagnostic(),

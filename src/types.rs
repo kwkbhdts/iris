@@ -14,7 +14,7 @@ pub struct Snapshot {
 }
 
 // 配送不能と生の応答を区別し、不明をオフと決めつけない。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ImeReply {
     NotQueried,
     Failed(u32),
