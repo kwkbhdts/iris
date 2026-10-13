@@ -137,7 +137,24 @@ unsafe extern "system" fn focus_event(
 /// マウス操作の内容は保存せず、介入だけを記録する。
 unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
-        ime::invalidate(model::guard::EventKind::Input);
+        let flags = if lparam != 0 {
+            (*(lparam as *const MSLLHOOKSTRUCT)).flags
+        } else {
+            u32::MAX
+        };
+        let injected_mask = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED;
+        let known = lparam != 0 && flags & !injected_mask == 0;
+        let injected = flags & injected_mask != 0;
+        let kind = if model::input_history::plain_mouse_move(
+            wparam as u32 == WM_MOUSEMOVE,
+            injected,
+            known,
+        ) {
+            model::guard::EventKind::MouseMove
+        } else {
+            model::guard::EventKind::Input
+        };
+        ime::invalidate(kind);
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
 }

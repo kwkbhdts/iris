@@ -5,6 +5,7 @@ pub enum Reason {
     Unknown,
     Abort,
     EpochInputLast,
+    EpochMouseMoveLast,
     EpochFocusEventLast,
     EpochTargetLast,
     EpochUnknown,
@@ -21,6 +22,8 @@ pub enum Reason {
     ImeWindowChangedOrUnknown,
     ImeOwnerMismatch,
     LayoutChanged,
+    HistoryBlockingEvent,
+    HistoryUnknown,
 }
 
 impl Reason {
@@ -30,6 +33,7 @@ impl Reason {
             Self::Unknown => "unknown",
             Self::Abort => "abort_flag",
             Self::EpochInputLast => "epoch_input_last",
+            Self::EpochMouseMoveLast => "epoch_mouse_move_last",
             Self::EpochFocusEventLast => "epoch_focus_event_last",
             Self::EpochTargetLast => "epoch_target_last",
             Self::EpochUnknown => "epoch_unknown",
@@ -46,6 +50,8 @@ impl Reason {
             Self::ImeWindowChangedOrUnknown => "ime_window_changed_or_unknown",
             Self::ImeOwnerMismatch => "ime_owner_mismatch",
             Self::LayoutChanged => "layout_changed",
+            Self::HistoryBlockingEvent => "history_blocking_event",
+            Self::HistoryUnknown => "history_unknown",
         }
     }
 }
@@ -54,18 +60,23 @@ impl Reason {
 pub struct Evidence {
     pub current: Reason,
     pub wait: Option<Reason>,
+    pub mouse_move_allowed: bool,
+    pub saw_move_only: bool,
 }
 
 impl Evidence {
     pub const UNKNOWN: Self = Self {
         current: Reason::Unknown,
         wait: None,
+        mouse_move_allowed: false,
+        saw_move_only: false,
     };
 }
 
 #[derive(Clone, Copy)]
 pub enum EventKind {
     Input,
+    MouseMove,
     Focus,
     Target,
 }
@@ -73,6 +84,7 @@ pub enum EventKind {
 /// イベント内容は保存せず、最後の世代番号だけを分類別に保持する。
 pub struct EpochEvidence {
     input: AtomicU64,
+    mouse_move: AtomicU64,
     focus: AtomicU64,
     target: AtomicU64,
 }
@@ -80,6 +92,7 @@ pub struct EpochEvidence {
 impl EpochEvidence {
     pub const EMPTY: Self = Self {
         input: AtomicU64::new(0),
+        mouse_move: AtomicU64::new(0),
         focus: AtomicU64::new(0),
         target: AtomicU64::new(0),
     };
@@ -88,6 +101,7 @@ impl EpochEvidence {
     pub fn record(&self, epoch: u64, kind: EventKind) {
         let slot = match kind {
             EventKind::Input => &self.input,
+            EventKind::MouseMove => &self.mouse_move,
             EventKind::Focus => &self.focus,
             EventKind::Target => &self.target,
         };
@@ -101,6 +115,9 @@ impl EpochEvidence {
         }
         if self.input.load(Ordering::SeqCst) == epoch {
             return Reason::EpochInputLast;
+        }
+        if self.mouse_move.load(Ordering::SeqCst) == epoch {
+            return Reason::EpochMouseMoveLast;
         }
         if self.focus.load(Ordering::SeqCst) == epoch {
             return Reason::EpochFocusEventLast;

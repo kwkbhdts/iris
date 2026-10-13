@@ -80,6 +80,7 @@ mod tests {
             evidence: guard::Evidence {
                 current: guard::Reason::EpochInputLast,
                 wait: None,
+                ..guard::Evidence::UNKNOWN
             },
             reply: None,
             input: Some(InputReply {

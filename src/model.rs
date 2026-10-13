@@ -3,6 +3,9 @@ use super::types::ImeReply;
 #[path = "guard.rs"]
 #[allow(dead_code)]
 pub mod guard;
+#[path = "input_history.rs"]
+#[allow(dead_code)]
+pub mod input_history;
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const RESTORE_DELAY_MS: u32 = 100;
@@ -88,10 +91,12 @@ impl RestoreDiagnostic {
             _ => self.evidence.current.code(),
         };
         format!(
-            "{} guard={} wait_guard={} ime={} input={} app_send_result=unknown",
+            "{} guard={} wait_guard={} mouse_move_allowed={} saw_move_only={} ime={} input={} app_send_result=unknown",
             self.code(),
             reason,
             self.evidence.wait.map_or("none", guard::Reason::code),
+            self.evidence.mouse_move_allowed,
+            self.evidence.saw_move_only,
             reply,
             input
         )
@@ -211,7 +216,7 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
             } else {
                 RestoreStage::ReadUnknown
             },
-            evidence: guard::Evidence::UNKNOWN,
+            evidence: backend.guard_evidence(),
             reply: Some(current),
             input: out.input,
         });
@@ -583,6 +588,7 @@ mod tests {
         f.evidence = guard::Evidence {
             current: guard::Reason::Abort,
             wait: Some(guard::Reason::Deadline),
+            ..guard::Evidence::UNKNOWN
         };
         let result = run(&mut f);
         let detail = result.restore.unwrap();

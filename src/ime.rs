@@ -1,5 +1,6 @@
 use crate::{
     model::guard::{EpochEvidence, EventKind, Evidence, Reason},
+    model::input_history::{Check, History},
     model::{self, Backend, InputReply, DEADLINE_MS, RESTORE_DELAY_MS},
     types::*,
 };
@@ -20,6 +21,7 @@ use windows_sys::Win32::{
 
 pub static EPOCH: AtomicU64 = AtomicU64::new(0);
 static EPOCH_EVIDENCE: EpochEvidence = EpochEvidence::EMPTY;
+static INPUT_HISTORY: History = History::EMPTY;
 pub static ABORT: AtomicBool = AtomicBool::new(false);
 // 無効化・終了は新規入力を止めるが、条件が保たれた復元は妨げない。
 pub static STOP: AtomicBool = AtomicBool::new(false);
@@ -30,6 +32,7 @@ const IMC_SETOPENSTATUS: usize = 0x0006;
 /// 元の世代加算を維持し、診断用にイベントの分類だけを添える。
 pub fn invalidate(kind: EventKind) {
     let epoch = EPOCH.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    INPUT_HISTORY.record(epoch, matches!(kind, EventKind::MouseMove));
     EPOCH_EVIDENCE.record(epoch, kind);
 }
 
@@ -234,7 +237,14 @@ impl ImeBackend {
             return self.failed(Reason::Abort);
         }
         let epoch = EPOCH.load(Ordering::SeqCst);
-        if epoch != self.epoch {
+        if self.evidence.mouse_move_allowed {
+            match INPUT_HISTORY.check(self.epoch, epoch, &EPOCH) {
+                Check::Unchanged => {}
+                Check::MovesOnly => self.evidence.saw_move_only = true,
+                Check::BlockingEvent => return self.failed(Reason::HistoryBlockingEvent),
+                Check::Unknown => return self.failed(Reason::HistoryUnknown),
+            }
+        } else if epoch != self.epoch {
             return self.failed(EPOCH_EVIDENCE.observed(epoch));
         }
         if !model::within_deadline(self.snapshot.at, unsafe { GetTickCount() }) {
@@ -353,7 +363,9 @@ pub fn execute(request: Request) -> Completion {
     let snapshot = request.snapshot;
     let warning = if STOP.load(Ordering::SeqCst)
         || ABORT.load(Ordering::SeqCst)
-        || EPOCH.load(Ordering::SeqCst) != request.epoch
+        || !INPUT_HISTORY
+            .check(request.epoch, EPOCH.load(Ordering::SeqCst), &EPOCH)
+            .permits()
         || !model::within_deadline(snapshot.at, unsafe { GetTickCount() })
         || !unchanged(snapshot)
     {
@@ -395,7 +407,10 @@ fn prepare_and_run(request: Request) -> Option<crate::warning::Warning> {
         epoch: request.epoch,
         ime,
         layout,
-        evidence: Evidence::UNKNOWN,
+        evidence: Evidence {
+            mouse_move_allowed: true,
+            ..Evidence::UNKNOWN
+        },
     };
     let result = model::run(&mut backend);
     if result.manual {
