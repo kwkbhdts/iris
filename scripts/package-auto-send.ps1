@@ -33,3 +33,7 @@ $lines = foreach ($name in @('iris-auto-send-probe.exe', 'AUTO_SEND_PROBE.md', '
     "$hash  $name"
 }
 $lines | Set-Content dist-auto-send/SHA256SUMS.txt -Encoding utf8NoBOM
+
+# ZIPへ渡すファイルの過不足と、同梱SHA-256を独立に検証する。
+python "$PSScriptRoot/verify-package.py" dist-auto-send iris-auto-send-probe.exe AUTO_SEND_PROBE.md
+if ($LASTEXITCODE -ne 0) { throw 'package verification failed' }

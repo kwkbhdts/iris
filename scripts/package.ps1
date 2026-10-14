@@ -16,3 +16,7 @@ $lines = foreach ($name in @('iris.exe', 'THIRD_PARTY_NOTICES.txt', 'RUST-LIBRAR
     "$hash  $name"
 }
 $lines | Set-Content dist/SHA256SUMS.txt -Encoding utf8NoBOM
+
+# ZIPへ渡すファイルの過不足と、同梱SHA-256を独立に検証する。
+python "$PSScriptRoot/verify-package.py" dist iris.exe
+if ($LASTEXITCODE -ne 0) { throw 'package verification failed' }
