@@ -42,7 +42,8 @@ struct Outcome {
     set_focus: &'static str,
 
     interrupted: bool,
-    permit_epoch: Option<u64>,
+    permitted: Option<[u64; 2]>,
+    verifying: bool,
     verification_failed: bool,
     input: Option<model::InputReply>,
     manual: bool,
@@ -56,7 +57,8 @@ impl Default for Outcome {
             set_focus: "not_called",
 
             interrupted: false,
-            permit_epoch: None,
+            permitted: None,
+            verifying: false,
             verification_failed: false,
             input: None,
             manual: false,
@@ -74,16 +76,17 @@ fn api<T>(trace: &mut Trace, name: &'static str, value: windows::core::Result<T>
         "uia_error"
     })
 }
-/// 世代はリセットせず、同一プロセスの前面通知でも中断する。
+/// F1基準を保持し、検証済み二通知以外の介入で中断する。
 fn guard(request: Request, trace: &mut Trace, outcome: &mut Outcome) -> Result<()> {
-    if let Some(epoch) = outcome.permit_epoch {
+    if outcome.verifying {
         if outcome.verification_failed {
             return Err("verification_already_aborted");
         }
-        return app::check_read_only(request, epoch).map_err(|reason| {
+        return app::check_send(request, outcome.permitted).map_err(|reason| {
             outcome.verification_failed = true;
             trace.record(format_args!(
-                "verification_aborted=true reason={reason} permit_epoch={epoch}"
+                "verification_aborted=true reason={reason} fixed_start_epoch={}",
+                request.epoch
             ));
             reason
         });
@@ -156,7 +159,7 @@ impl Session {
         let result = self.perform(request, &mut trace, &mut outcome);
         if request.started.elapsed().as_millis() >= policy::BUDGET_MS {
             app::STOP.store(true, Ordering::SeqCst);
-            if outcome.permit_epoch.is_some() {
+            if outcome.verifying {
                 outcome.verification_failed = true;
             } else {
                 outcome.interrupted = true;
@@ -167,7 +170,7 @@ impl Session {
             attempted: false,
             inserted: 0,
         });
-        trace.record(format_args!("search={} revalidated={} set_focus={} original_interrupted={} verification_aborted={} permit_epoch={:?} input_attempted={} input_inserted={} manual_check={} reason={} app_send_result=unknown", outcome.search, outcome.revalidated, outcome.set_focus, outcome.interrupted, outcome.verification_failed, outcome.permit_epoch, input.attempted, input.inserted, outcome.manual, result.as_ref().err().copied().unwrap_or("none")));
+        trace.record(format_args!("search={} revalidated={} set_focus={} original_interrupted={} verification_aborted={} permitted_notifications={:?} input_attempted={} input_inserted={} manual_check={} reason={} app_send_result=unknown", outcome.search, outcome.revalidated, outcome.set_focus, outcome.interrupted, outcome.verification_failed, outcome.permitted, input.attempted, input.inserted, outcome.manual, result.as_ref().err().copied().unwrap_or("none")));
         let label = if input.attempted && input.inserted == model::INPUT_COUNT {
             "INPUT_ENQUEUED"
         } else if input.attempted {
@@ -176,290 +179,6 @@ impl Session {
             "NO_INPUT"
         };
         trace.finish(label, app::STOP.load(Ordering::SeqCst))
-    }
-
-    /// 親なしとエラーを区別し、子や兄弟の全走査は行わない。
-    fn parent(
-        &self,
-        node: &IUIAutomationElement,
-        request: Request,
-        trace: &mut Trace,
-        outcome: &mut Outcome,
-    ) -> Result<Option<IUIAutomationElement>> {
-        guard(request, trace, outcome)?;
-        let mut raw = std::ptr::null_mut();
-        let hr = unsafe {
-            (self.walker.vtable().GetParentElement)(self.walker.as_raw(), node.as_raw(), &mut raw)
-        };
-        let value = if raw.is_null() {
-            None
-        } else {
-            Some(unsafe { IUIAutomationElement::from_raw(raw) })
-        };
-        api(trace, "GetParentElement", hr.ok())?;
-        Ok(value)
-    }
-
-    /// 対象の現在属性を再確認し、ClassNameを固定トークンへ変換する。
-    fn editor(
-        &self,
-        node: &IUIAutomationElement,
-        request: Request,
-        trace: &mut Trace,
-        outcome: &mut Outcome,
-    ) -> Result<bool> {
-        let kind = call!(
-            trace,
-            request,
-            outcome,
-            "ControlType",
-            node.CurrentControlType()
-        )?;
-        let control = call!(
-            trace,
-            request,
-            outcome,
-            "IsControlElement",
-            node.CurrentIsControlElement()
-        )?
-        .as_bool();
-        let enabled = call!(
-            trace,
-            request,
-            outcome,
-            "IsEnabled",
-            node.CurrentIsEnabled()
-        )?
-        .as_bool();
-        let focusable = call!(
-            trace,
-            request,
-            outcome,
-            "IsKeyboardFocusable",
-            node.CurrentIsKeyboardFocusable()
-        )?
-        .as_bool();
-        let offscreen = call!(
-            trace,
-            request,
-            outcome,
-            "IsOffscreen",
-            node.CurrentIsOffscreen()
-        )?
-        .as_bool();
-        let password = call!(
-            trace,
-            request,
-            outcome,
-            "IsPassword",
-            node.CurrentIsPassword()
-        )?
-        .as_bool();
-        if !control
-            || !policy::editable(
-                kind == UIA_EditControlTypeId,
-                enabled,
-                focusable,
-                offscreen,
-                password,
-            )
-        {
-            return Ok(false);
-        }
-        let class = call!(
-            trace,
-            request,
-            outcome,
-            "ClassName",
-            node.CurrentClassName()
-        )?;
-        Ok(rules::markers(&class)?.editor)
-    }
-
-    /// Raw祖先の順序・文書・前面ルートを検証し、領域のUIA参照を保持する。
-    fn regions(
-        &self,
-        node: &IUIAutomationElement,
-        root: &IUIAutomationElement,
-        request: Request,
-        trace: &mut Trace,
-        outcome: &mut Outcome,
-    ) -> Result<Option<Vec<IUIAutomationElement>>> {
-        let mut node = node.clone();
-        let mut path = rules::Ancestors::default();
-        let mut regions = Vec::new();
-        for depth in 0..rules::ANCESTOR_LIMIT {
-            let same = call!(
-                trace,
-                request,
-                outcome,
-                "CompareElements(root)",
-                self.automation.CompareElements(&node, root)
-            )?
-            .as_bool();
-            if same {
-                return Ok(path.matches(true).then_some(regions));
-            }
-            // 入力要素自身は祖先として数えない。
-            if depth > 0 {
-                let kind = call!(
-                    trace,
-                    request,
-                    outcome,
-                    "ControlType(ancestor)",
-                    node.CurrentControlType()
-                )?;
-                let class = call!(
-                    trace,
-                    request,
-                    outcome,
-                    "ClassName(ancestor)",
-                    node.CurrentClassName()
-                )?;
-                if path
-                    .advance(rules::markers(&class)?, kind == UIA_DocumentControlTypeId)
-                    .is_some()
-                {
-                    regions.push(node.clone());
-                }
-            }
-            if depth + 1 == rules::ANCESTOR_LIMIT {
-                return Err("ancestor_limit");
-            }
-            node = self
-                .parent(&node, request, trace, outcome)?
-                .ok_or("no_parent_before_root")?;
-        }
-        Err("ancestor_limit")
-    }
-
-    /// 本文側のフォーカスが同じ前面ルート内のどの文書に属するか確認する。
-    fn document(
-        &self,
-        node: &IUIAutomationElement,
-        root: &IUIAutomationElement,
-        request: Request,
-        trace: &mut Trace,
-        outcome: &mut Outcome,
-    ) -> Result<IUIAutomationElement> {
-        let mut node = node.clone();
-        let mut document = None;
-        for depth in 0..rules::ANCESTOR_LIMIT {
-            if call!(
-                trace,
-                request,
-                outcome,
-                "CompareElements(initial_root)",
-                self.automation.CompareElements(&node, root)
-            )?
-            .as_bool()
-            {
-                return document.ok_or("initial_focus_outside_document");
-            }
-            let kind = call!(
-                trace,
-                request,
-                outcome,
-                "ControlType(initial)",
-                node.CurrentControlType()
-            )?;
-            if document.is_none() && kind == UIA_DocumentControlTypeId {
-                document = Some(node.clone());
-            }
-            if depth + 1 == rules::ANCESTOR_LIMIT {
-                return Err("initial_ancestor_limit");
-            }
-            node = self
-                .parent(&node, request, trace, outcome)?
-                .ok_or("initial_root_not_reached")?;
-        }
-        Err("initial_ancestor_limit")
-    }
-
-    /// UIA条件検索が完了した全候補を調べ、固定ルールの一致が一件だけなら返す。
-    fn search(
-        &self,
-        root: &IUIAutomationElement,
-        request: Request,
-        trace: &mut Trace,
-        outcome: &mut Outcome,
-    ) -> Result<Target> {
-        let list = call!(
-            trace,
-            request,
-            outcome,
-            "FindAll(Edit)",
-            root.FindAll(TreeScope_Descendants, &self.condition)
-        )?;
-        let count = call!(trace, request, outcome, "Length", list.Length())?;
-        guard(request, trace, outcome)?;
-        trace.record(format_args!("edit_candidates={count}"));
-        if count < 0 || count as usize > rules::CANDIDATE_LIMIT {
-            return Err("candidate_limit");
-        }
-        let mut matches = Vec::new();
-        for index in 0..count {
-            let element = call!(
-                trace,
-                request,
-                outcome,
-                "GetElement",
-                list.GetElement(index)
-            )?;
-            let editor = self.editor(&element, request, trace, outcome)?;
-            let regions = if editor {
-                self.regions(&element, root, request, trace, outcome)?
-            } else {
-                None
-            };
-            trace.record(format_args!(
-                "candidate={index} editor_token={editor} structure_match={}",
-                regions.is_some()
-            ));
-            if let Some(regions) = regions {
-                matches.push(Target { element, regions });
-            }
-        }
-        guard(request, trace, outcome)?;
-        trace.record(format_args!(
-            "search_complete=true rule_matches={}",
-            matches.len()
-        ));
-        if !rules::unique(true, matches.len()) {
-            return Err(if matches.is_empty() {
-                "no_match"
-            } else {
-                "ambiguous"
-            });
-        }
-        Ok(matches.remove(0))
-    }
-
-    /// SetFocus後は読み取りだけで一致を観測し、介入後は一切続けない。
-    fn observe(
-        &self,
-        target: &IUIAutomationElement,
-        request: Request,
-        trace: &mut Trace,
-        outcome: &mut Outcome,
-    ) -> Result<bool> {
-        let actual = call!(
-            trace,
-            request,
-            outcome,
-            "GetFocusedElement(after)",
-            self.automation.GetFocusedElement()
-        )?;
-        let same = call!(
-            trace,
-            request,
-            outcome,
-            "CompareElements(after)",
-            self.automation.CompareElements(target, &actual)
-        )?
-        .as_bool();
-        guard(request, trace, outcome)?;
-        Ok(same)
     }
 
     /// F1ごとに探索し直し、再検証後に一回だけフォーカスを要求する。
@@ -571,12 +290,9 @@ impl Session {
         trace.stage = "transition";
         let original_valid = app::check(request).is_ok();
         let (epoch, snapshot) = app::read_only_snapshot(request);
-        outcome.interrupted = !original_valid || epoch != request.epoch;
+        outcome.interrupted = !original_valid;
         app::trace_interventions(request, trace, "transition_history", Some(epoch));
-        let unchanged = original_valid
-            && epoch == request.epoch
-            && snapshot.total == Some(0)
-            && snapshot.missing == 0;
+        let unchanged = app::check_send(request, None).is_ok();
         let limited = transition::allowed(
             &snapshot,
             request.window.pid,
@@ -589,10 +305,20 @@ impl Session {
             return Err("transition_rejected");
         }
         // ここから新しい送信前検証。原要求・世代・失効履歴は書き換えない。
-        app::check_read_only(request, epoch)?;
-        outcome.permit_epoch = Some(epoch);
+        if !unchanged {
+            let mut notifications = snapshot
+                .events
+                .iter()
+                .filter(|e| e.observation.kind == crate::intervention::Kind::Foreground);
+            outcome.permitted = Some([
+                notifications.next().ok_or("transition_missing")?.epoch,
+                notifications.next().ok_or("transition_missing")?.epoch,
+            ]);
+        }
+        app::check_send(request, outcome.permitted)?;
+        outcome.verifying = true;
         trace.record(format_args!(
-            "verification_started=true original_epoch={} permit_epoch={epoch}",
+            "verification_started=true fixed_start_epoch={} observed_epoch={epoch}",
             request.epoch
         ));
         trace.stage = "verify.focus";
@@ -635,14 +361,20 @@ impl Session {
             tid: request.window.tid,
         })?;
         guard(request, trace, outcome)?;
-        let quick = || app::check_read_only(request, epoch).is_ok();
+        let permitted = outcome.permitted;
+        let quick = || app::check_send(request, permitted).is_ok();
         let result = {
-            let mut validate = || {
-                trace.stage = "pre_input.verify";
+            let mut validate = |stage| {
+                trace.stage = match stage {
+                    writer::ValidationStage::Send => "pre_input.verify",
+                    writer::ValidationStage::Restore => "pre_restore.verify",
+                };
                 match self.validate_send(&target, &root, request, trace, outcome) {
                     Ok(()) => true,
                     Err(reason) => {
-                        trace.record(format_args!("send_precheck=false reason={reason}"));
+                        trace.record(format_args!(
+                            "target_precheck=false stage={stage:?} reason={reason}"
+                        ));
                         false
                     }
                 }
@@ -653,6 +385,7 @@ impl Session {
                 validate: &mut validate,
                 failed: false,
                 consumed: false,
+                evidence: model::guard::Evidence::UNKNOWN,
             };
             let result = model::run(&mut backend);
             if backend.failed {
@@ -720,6 +453,11 @@ impl Session {
                 return Err("send_target_or_region_changed");
             }
         }
+        // 検索後のスクロールでも、直前の可視性・有効性を取り直す。
+        if !self.editor(&target.element, request, trace, outcome)? {
+            outcome.verification_failed = true;
+            return Err("send_target_no_longer_editable");
+        }
         if !self.observe(&target.element, request, trace, outcome)? {
             outcome.verification_failed = true;
             return Err("send_focus_changed");
@@ -727,3 +465,6 @@ impl Session {
         guard(request, trace, outcome)
     }
 }
+
+#[path = "../auto_focus/search.rs"]
+mod search;

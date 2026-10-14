@@ -112,9 +112,7 @@ fn refresh() {
 
 /// 修飾キーの押下を確認する。
 fn modifiers_down() -> bool {
-    [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
-        .iter()
-        .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } < 0)
+    crate::logic::win32::modifiers_down()
 }
 
 /// 前面・フォーカス変更を失効として記録し、名前照会は後で行う。
@@ -142,15 +140,14 @@ unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
         } else {
             u32::MAX
         };
-        let injected_mask = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED;
-        let known = lparam != 0 && flags & !injected_mask == 0;
-        let injected = flags & injected_mask != 0;
-        let kind = if model::input_history::plain_mouse_move(
-            wparam as u32 == WM_MOUSEMOVE,
-            injected,
+        let injected = crate::logic::win32::mouse_injected(flags);
+        let known = lparam != 0 && injected.is_some();
+        let kind = if model::input_history::plain_pointer_event(
+            crate::logic::win32::pointer_event(wparam as u32),
+            injected.unwrap_or(true),
             known,
         ) {
-            model::guard::EventKind::MouseMove
+            model::guard::EventKind::PointerAllowed
         } else {
             model::guard::EventKind::Input
         };

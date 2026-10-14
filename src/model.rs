@@ -3,9 +3,11 @@ use super::types::ImeReply;
 #[path = "guard.rs"]
 #[allow(dead_code)]
 pub mod guard;
-#[path = "input_history.rs"]
-#[allow(dead_code)]
-pub mod input_history;
+#[cfg(windows)]
+pub use crate::logic::input_history;
+#[cfg(test)]
+#[path = "input_history_tests.rs"]
+mod input_history_tests;
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const RESTORE_DELAY_MS: u32 = 100;
@@ -41,6 +43,10 @@ pub trait Backend {
     fn send_once(&mut self) -> InputReply;
     /// 入力後の復元だけの暫定待機。アプリの処理完了確認ではない。
     fn wait_before_restore(&mut self);
+    /// 復元前に、版固有の対象確認も完了する。
+    fn before_restore(&mut self) -> bool {
+        self.guarded()
+    }
     /// 再取得せず、直前の判定が残した診断だけを返す。
     fn guard_evidence(&self) -> guard::Evidence {
         guard::Evidence::UNKNOWN
@@ -91,12 +97,12 @@ impl RestoreDiagnostic {
             _ => self.evidence.current.code(),
         };
         format!(
-            "{} guard={} wait_guard={} mouse_move_allowed={} saw_move_only={} ime={} input={} app_send_result=unknown",
+            "{} guard={} wait_guard={} pointer_allowed={} saw_pointer_only={} ime={} input={} app_send_result=unknown",
             self.code(),
             reason,
             self.evidence.wait.map_or("none", guard::Reason::code),
-            self.evidence.mouse_move_allowed,
-            self.evidence.saw_move_only,
+            self.evidence.pointer_allowed,
+            self.evidence.saw_pointer_only,
             reply,
             input
         )
@@ -130,6 +136,19 @@ impl Outcome {
             _ => "IRIS-I999",
         }
     }
+}
+
+/// 復元待機中も両版で5msごとに同じガードを確認する。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn wait_before_restore(backend: &mut impl Backend) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed().as_millis() < RESTORE_DELAY_MS as u128 {
+        if !backend.guarded() {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
 }
 
 /// 元の応答0/1を分岐し、入力一回と条件付き復元だけを実行する。
@@ -199,7 +218,7 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
         backend.wait_before_restore();
     }
     out.status = "restore_skipped; guard_failed_or_state_unknown";
-    if !backend.guarded() {
+    if !backend.before_restore() {
         out.restore = Some(RestoreDiagnostic {
             stage: RestoreStage::BeforeGuard,
             evidence: backend.guard_evidence(),

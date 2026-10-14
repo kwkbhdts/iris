@@ -1,14 +1,13 @@
 use crate::{
     model::guard::{EpochEvidence, EventKind, Evidence, Reason},
     model::input_history::{Check, History},
-    model::{self, Backend, InputReply, DEADLINE_MS, RESTORE_DELAY_MS},
+    model::{self, Backend, InputReply, DEADLINE_MS},
     types::*,
 };
 use std::{
     mem::size_of,
     ptr::null_mut,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    time::Duration,
 };
 use windows_sys::Win32::{
     Foundation::*,
@@ -32,7 +31,7 @@ const IMC_SETOPENSTATUS: usize = 0x0006;
 /// 元の世代加算を維持し、診断用にイベントの分類だけを添える。
 pub fn invalidate(kind: EventKind) {
     let epoch = EPOCH.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-    INPUT_HISTORY.record(epoch, matches!(kind, EventKind::MouseMove));
+    INPUT_HISTORY.record(epoch, matches!(kind, EventKind::PointerAllowed));
     EPOCH_EVIDENCE.record(epoch, kind);
 }
 
@@ -237,15 +236,11 @@ impl ImeBackend {
             return self.failed(Reason::Abort);
         }
         let epoch = EPOCH.load(Ordering::SeqCst);
-        if self.evidence.mouse_move_allowed {
-            match INPUT_HISTORY.check(self.epoch, epoch, &EPOCH) {
-                Check::Unchanged => {}
-                Check::MovesOnly => self.evidence.saw_move_only = true,
-                Check::BlockingEvent => return self.failed(Reason::HistoryBlockingEvent),
-                Check::Unknown => return self.failed(Reason::HistoryUnknown),
-            }
-        } else if epoch != self.epoch {
-            return self.failed(EPOCH_EVIDENCE.observed(epoch));
+        match INPUT_HISTORY.check(self.epoch, epoch, &EPOCH) {
+            Check::Unchanged | Check::AllowedTransition => {}
+            Check::PointerOnly => self.evidence.saw_pointer_only = true,
+            Check::BlockingEvent => return self.failed(Reason::HistoryBlockingEvent),
+            Check::Unknown => return self.failed(Reason::HistoryUnknown),
         }
         if !model::within_deadline(self.snapshot.at, unsafe { GetTickCount() }) {
             return self.failed(Reason::Deadline);
@@ -267,10 +262,7 @@ impl Backend for ImeBackend {
         if other_iris_running() {
             return self.failed(Reason::OtherIris);
         }
-        if [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
-            .iter()
-            .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } < 0)
-        {
+        if crate::logic::win32::modifiers_down() {
             return self.failed(Reason::ModifierDown);
         }
         let (Ok(fg), Ok(focus)) = (self.snapshot.foreground, self.snapshot.focus) else {
@@ -346,14 +338,9 @@ impl Backend for ImeBackend {
 
     /// 投入後の復元用実験待機。文字と Enter の間には待たない。
     fn wait_before_restore(&mut self) {
-        let start = unsafe { GetTickCount() };
-        while unsafe { GetTickCount() }.wrapping_sub(start) < RESTORE_DELAY_MS {
-            if !self.guarded() {
-                self.evidence.wait = Some(self.evidence.current);
-                ABORT.store(true, Ordering::SeqCst);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        if !model::wait_before_restore(self) {
+            self.evidence.wait = Some(self.evidence.current);
+            ABORT.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -382,36 +369,24 @@ pub fn execute(request: Request) -> Completion {
 /// IME の所有者とレイアウトを取得し、比較版と同じ手順で入力・復元する。
 fn prepare_and_run(request: Request) -> Option<crate::warning::Warning> {
     use crate::warning::Warning;
-    let Ok(focus) = request.snapshot.focus else {
-        return Some(Warning::new(
-            "IRIS-P001",
-            "入力フォーカスを確認できないため送信せず、Iris を無効にしました。",
-        ));
-    };
-    let ime = window_id(unsafe { ImmGetDefaultIMEWnd(focus.hwnd as HWND) });
-    let Ok(ime) = ime else {
-        return Some(Warning::new(
-            "IRIS-P002",
-            "IME の状態を取得できないため送信せず、Iris を無効にしました。",
-        ));
-    };
-    let layout = unsafe { GetKeyboardLayout(focus.tid) } as usize;
-    if layout == 0 || ime.pid != focus.pid || ime.tid != focus.tid {
-        return Some(Warning::new(
-            "IRIS-P003",
-            "IME の所属またはレイアウトを確認できないため送信せず、Iris を無効にしました。",
-        ));
-    }
-    let mut backend = ImeBackend {
-        snapshot: request.snapshot,
-        epoch: request.epoch,
-        ime,
-        layout,
-        evidence: Evidence {
-            mouse_move_allowed: true,
-            ..Evidence::UNKNOWN
-        },
-    };
+    let mut backend =
+        match prepare_backend(request) {
+            Ok(backend) => backend,
+            Err(reason) => return Some(match reason {
+                "focus_snapshot_failed" => Warning::new(
+                    "IRIS-P001",
+                    "入力フォーカスを確認できないため送信せず、Iris を無効にしました。",
+                ),
+                "ime_unknown" => Warning::new(
+                    "IRIS-P002",
+                    "IME の状態を取得できないため送信せず、Iris を無効にしました。",
+                ),
+                _ => Warning::new(
+                    "IRIS-P003",
+                    "IME の所属またはレイアウトを確認できないため送信せず、Iris を無効にしました。",
+                ),
+            }),
+        };
     let result = model::run(&mut backend);
     if result.manual {
         Some(Warning::new(result.diagnostic(), "入力または IME 復元を確認できないため Iris を無効にしました。\n入力・送信結果、キー状態、元の入力欄の IME を手動確認・復元してください。自動再送はしません。").with_restore(result.restore))
@@ -425,15 +400,17 @@ fn prepare_and_run(request: Request) -> Option<crate::warning::Warning> {
     }
 }
 
-/// オート試作の検証後に新しいWin32フォーカスを取得し、既存バックエンドを準備する。
-#[allow(dead_code)]
-pub fn prepare_auto(target: WindowId) -> Result<ImeBackend, &'static str> {
-    let request = capture(target, unsafe { GetTickCount() });
+/// 両版で同じ所属・レイアウト確認と移動許容ポリシーを準備する。
+fn prepare_backend(request: Request) -> Result<ImeBackend, &'static str> {
     let focus = request
         .snapshot
         .focus
         .map_err(|_| "focus_snapshot_failed")?;
-    if focus.pid != target.pid {
+    if request
+        .snapshot
+        .foreground
+        .map_or(true, |target| focus.pid != target.pid)
+    {
         return Err("focus_process_changed");
     }
     let ime =
@@ -442,13 +419,23 @@ pub fn prepare_auto(target: WindowId) -> Result<ImeBackend, &'static str> {
     if layout == 0 || ime.pid != focus.pid || ime.tid != focus.tid {
         return Err("ime_owner_or_layout_unknown");
     }
-    let mut backend = ImeBackend {
+    Ok(ImeBackend {
         snapshot: request.snapshot,
         epoch: request.epoch,
         ime,
         layout,
-        evidence: Evidence::UNKNOWN,
-    };
+        evidence: Evidence {
+            pointer_allowed: true,
+            ..Evidence::UNKNOWN
+        },
+    })
+}
+
+/// オート試作の検証後に新しいWin32フォーカスを取得し、既存バックエンドを準備する。
+#[allow(dead_code)]
+pub fn prepare_auto(target: WindowId) -> Result<ImeBackend, &'static str> {
+    let request = capture(target, unsafe { GetTickCount() });
+    let mut backend = prepare_backend(request)?;
     if !backend.guarded() {
         return Err("fresh_snapshot_invalid");
     }

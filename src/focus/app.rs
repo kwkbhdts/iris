@@ -80,9 +80,7 @@ pub fn identify(window: Window) -> Option<App> {
 
 /// 修飾付きのキーを試作の操作として扱わない。
 fn modifiers() -> bool {
-    [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
-        .iter()
-        .any(|&key| unsafe { GetAsyncKeyState(key as i32) } < 0)
+    crate::logic::win32::modifiers_down()
 }
 
 /// 失敗理由と、判定時に実際に観測した世代を保持する。
@@ -95,7 +93,11 @@ pub struct CheckFailure {
 pub fn check(request: Request) -> Result<(), CheckFailure> {
     let same_window = foreground() == Some(request.window);
     let epoch = EVENTS.epoch();
-    let same_epoch = epoch == request.epoch;
+    let same_epoch = if crate::AUTO_SEND {
+        EVENTS.check(request.epoch, None).permits()
+    } else {
+        epoch == request.epoch
+    };
     let elapsed = request.started.elapsed().as_millis();
     let result = if STOP.load(Ordering::SeqCst) {
         Err("stopped")
@@ -113,6 +115,30 @@ pub fn check(request: Request) -> Result<(), CheckFailure> {
         Ok(())
     };
     result.map_err(|reason| CheckFailure { reason, epoch })
+}
+
+/// オート送信は探索開始から同じ履歴を使い、検証済みの二通知だけを除外する。
+#[allow(dead_code)]
+pub fn check_send(request: Request, permitted: Option<[u64; 2]>) -> Result<(), &'static str> {
+    if STOP.load(Ordering::SeqCst) {
+        return Err("stopped");
+    }
+    if !EVENTS.check(request.epoch, permitted).permits() {
+        return Err("input_or_unknown_history");
+    }
+    if foreground() != Some(request.window) {
+        return Err("foreground_changed");
+    }
+    if request.started.elapsed().as_millis() >= policy::BUDGET_MS {
+        return Err("deadline_exceeded");
+    }
+    if modifiers() {
+        return Err("modifier_down");
+    }
+    if !EVENTS.check(request.epoch, permitted).permits() {
+        return Err("input_or_unknown_history");
+    }
+    Ok(())
 }
 
 /// 原要求を変更せず、観測開始候補の世代と既知の履歴を返す。
@@ -164,7 +190,7 @@ pub fn trace_interventions(
         }
     }
     trace.record(format_args!("intervention_point={point} start_epoch={} observed_epoch={end} epoch_delta={:?} missing={} counts_complete={} detail_omitted={}", request.epoch, snapshot.total, snapshot.missing, snapshot.total.is_some() && snapshot.missing == 0, snapshot.events.len().saturating_sub(8)));
-    trace.record(format_args!("intervention_point={point} foreground={} mouse_move={} mouse_button={} mouse_wheel={} mouse_other={} keyboard_other_or_injected={} new_F1_F2_request={} watchdog={} injected={injected}", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7]));
+    trace.record(format_args!("intervention_point={point} foreground={} mouse_move={} mouse_button={} mouse_wheel={} mouse_other={} keyboard_other_or_injected={} new_F1_F2_request={} watchdog={} mouse_horizontal_wheel={} injected={injected}", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8]));
     for event in snapshot
         .events
         .iter()
@@ -289,14 +315,24 @@ unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
             WM_MOUSEMOVE => Kind::MouseMove,
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
             | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => Kind::MouseButton,
-            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => Kind::MouseWheel,
+            WM_MOUSEWHEEL => Kind::MouseWheel,
+            WM_MOUSEHWHEEL => Kind::MouseHorizontalWheel,
             _ => Kind::MouseOther,
         };
         EVENTS.record(|| {
             observe(
                 kind,
-                Truth::known((*data).flags & LLMHF_INJECTED != 0),
-                (*data).time,
+                if data.is_null() {
+                    Truth::Unknown
+                } else {
+                    crate::logic::win32::mouse_injected((*data).flags)
+                        .map_or(Truth::Unknown, Truth::known)
+                },
+                if data.is_null() {
+                    GetTickCount()
+                } else {
+                    (*data).time
+                },
                 received,
             )
         });

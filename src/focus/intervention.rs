@@ -1,7 +1,8 @@
+use crate::logic::input_history::{plain_pointer_event, Check, History, PointerEvent};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 const CAPACITY: usize = 128;
-pub const KIND_COUNT: usize = 8;
+pub const KIND_COUNT: usize = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
@@ -14,6 +15,7 @@ pub enum Kind {
     KeyboardOther,
     NewShortcut,
     Watchdog,
+    MouseHorizontalWheel,
 }
 impl Kind {
     /// 数値を検証し、不完全な記録を既知の原因に見せない。
@@ -27,6 +29,7 @@ impl Kind {
             Self::KeyboardOther,
             Self::NewShortcut,
             Self::Watchdog,
+            Self::MouseHorizontalWheel,
         ];
         kinds.get(value as usize).copied()
     }
@@ -39,6 +42,7 @@ impl Kind {
             Self::MouseMove => "mouse_move",
             Self::MouseButton => "mouse_button",
             Self::MouseWheel => "mouse_wheel",
+            Self::MouseHorizontalWheel => "mouse_horizontal_wheel",
             Self::MouseOther => "mouse_other",
             Self::KeyboardOther => "keyboard_other_or_injected",
             Self::NewShortcut => "new_F1_F2_request",
@@ -95,6 +99,23 @@ pub struct Observation {
     pub window_pid: u32,
     pub same_received_foreground: Truth,
 }
+impl Observation {
+    /// 記録器と限定通知の照合で同じ非注入ポインター方針を使う。
+    pub fn permitted_pointer(&self) -> bool {
+        let event = match self.kind {
+            Kind::MouseMove => PointerEvent::Move,
+            Kind::MouseWheel => PointerEvent::VerticalWheel,
+            Kind::MouseHorizontalWheel => PointerEvent::HorizontalWheel,
+            _ => PointerEvent::Other,
+        };
+        plain_pointer_event(
+            event,
+            self.injected == Truth::True,
+            self.injected != Truth::Unknown,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Event {
     pub epoch: u64,
@@ -124,6 +145,7 @@ impl Slot {
 pub struct Events {
     epoch: AtomicU64,
     slots: [Slot; CAPACITY],
+    history: History,
 }
 pub struct Snapshot {
     pub total: Option<u64>,
@@ -134,6 +156,7 @@ impl Events {
     pub const EMPTY: Self = Self {
         epoch: AtomicU64::new(0),
         slots: [const { Slot::EMPTY }; CAPACITY],
+        history: History::EMPTY,
     };
 
     /// ガードが従来と同じ世代値を参照する。
@@ -160,7 +183,15 @@ impl Events {
         slot.window.store(event.window as u64, SeqCst);
         slot.window_pid.store(u64::from(event.window_pid), SeqCst);
         slot.stamp.store(epoch, SeqCst);
+        self.history.record(epoch, event.permitted_pointer());
         epoch
+    }
+
+    /// F1からの共通履歴を照合し、通知例外後も基準を変えない。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn check(&self, start: u64, permitted: Option<[u64; 2]>) -> Check {
+        self.history
+            .check_with_transition(start, self.epoch(), &self.epoch, permitted)
     }
 
     /// 観測済みの世代までを有限に読む。上書き・書きかけを推測で補わない。
@@ -279,6 +310,7 @@ mod tests {
         let log = Events::EMPTY;
         let end = log.record(|| {
             assert_eq!(log.epoch(), 1);
+            assert_eq!(log.check(0, None), Check::Unknown);
             let pending = log.snapshot(0, 1);
             assert_eq!(pending.missing, 1);
             assert!(pending.events.is_empty());
@@ -318,6 +350,9 @@ mod tests {
         assert_eq!(snapshot.missing, 1);
         assert!(snapshot.events.is_empty());
         assert_eq!(log.snapshot(10, 0).total, None);
+        assert_eq!(log.check(0, None), Check::Unknown);
+        log.record(|| observation(Kind::MouseMove, false, 1, 1, 0));
+        assert_eq!(log.check(0, None), Check::Unknown);
         assert_eq!(relative_tick(5, u32::MAX - 4), 10);
     }
     /// 書き手と競合しても、異なる世代の属性を合成して報告しない。

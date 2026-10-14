@@ -2,9 +2,14 @@ use crate::intervention::{Kind, Snapshot, Truth};
 
 /// 二通知の実測パターンだけを許可し、自己誘発の因果は主張しない。
 pub fn allowed(snapshot: &Snapshot, pid: u32, hwnd: usize, set_start: u64, set_end: u64) -> bool {
+    let events: Vec<_> = snapshot
+        .events
+        .iter()
+        .filter(|event| !event.observation.permitted_pointer())
+        .collect();
     if snapshot.missing != 0
-        || snapshot.total != Some(2)
-        || snapshot.events.len() != 2
+        || snapshot.total != Some(snapshot.events.len() as u64)
+        || events.len() != 2
         || pid == 0
         || hwnd == 0
         || set_start == u64::MAX
@@ -13,9 +18,9 @@ pub fn allowed(snapshot: &Snapshot, pid: u32, hwnd: usize, set_start: u64, set_e
     {
         return false;
     }
-    let first = snapshot.events[0].observation;
-    let last = snapshot.events[1].observation;
-    snapshot.events.iter().all(|e| {
+    let first = events[0].observation;
+    let last = events[1].observation;
+    events.iter().all(|e| {
         let o = e.observation;
         o.kind == Kind::Foreground
             && o.window_pid == pid
@@ -96,5 +101,35 @@ mod tests {
         s.events[0].observation.same_received_foreground = Truth::Unknown;
         assert!(!allowed(&s, 7, 10, 11, 15));
         assert!(!allowed(&snapshot(), 7, 10, u64::MAX, u64::MAX));
+    }
+    /// 二通知の周囲の既知の移動だけを除き、注入・未知・欠落は拒否する。
+    #[test]
+    fn movement_around_transition_keeps_strict_notification_checks() {
+        for (position, kind) in (0..=2).flat_map(|p| {
+            [
+                Kind::MouseMove,
+                Kind::MouseWheel,
+                Kind::MouseHorizontalWheel,
+            ]
+            .map(|k| (p, k))
+        }) {
+            let mut s = snapshot();
+            let mut movement = s.events[0];
+            movement.observation.kind = kind;
+            movement.observation.injected = Truth::False;
+            s.events.insert(position, movement);
+            for (index, event) in s.events.iter_mut().enumerate() {
+                event.epoch = index as u64 + 1;
+            }
+            s.total = Some(3);
+            assert!(allowed(&s, 7, 10, 11, 15));
+            for truth in [Truth::True, Truth::Unknown] {
+                s.events[position].observation.injected = truth;
+                assert!(!allowed(&s, 7, 10, 11, 15));
+            }
+            s.events[position].observation.injected = Truth::False;
+            s.missing = 1;
+            assert!(!allowed(&s, 7, 10, 11, 15));
+        }
     }
 }

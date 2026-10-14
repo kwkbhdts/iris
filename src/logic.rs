@@ -1,3 +1,10 @@
+#[path = "input_history.rs"]
+#[allow(dead_code)]
+pub mod input_history;
+#[cfg(windows)]
+#[path = "win32.rs"]
+pub mod win32;
+
 #[derive(Clone, Copy, Default)]
 pub struct F1State {
     pub down: bool,
