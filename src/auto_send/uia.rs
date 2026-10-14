@@ -1,6 +1,6 @@
 use crate::{
     app::{self, Request},
-    diagnostic::{App, Trace},
+    diagnostic::Trace,
     ime, model, policy, rules, transition, types, writer,
 };
 use std::{
@@ -171,7 +171,13 @@ impl Session {
             inserted: 0,
         });
         trace.record(format_args!("search={} revalidated={} set_focus={} original_interrupted={} verification_aborted={} permitted_notifications={:?} input_attempted={} input_inserted={} manual_check={} reason={} app_send_result=unknown", outcome.search, outcome.revalidated, outcome.set_focus, outcome.interrupted, outcome.verification_failed, outcome.permitted, input.attempted, input.inserted, outcome.manual, result.as_ref().err().copied().unwrap_or("none")));
-        let label = if input.attempted && input.inserted == model::INPUT_COUNT {
+        let label = if crate::inspect_only() {
+            if result.is_ok() {
+                "OBSERVED"
+            } else {
+                "INCOMPLETE"
+            }
+        } else if input.attempted && input.inserted == model::INPUT_COUNT {
             "INPUT_ENQUEUED"
         } else if input.attempted {
             "INPUT_PARTIAL_OR_FAILED"
@@ -183,7 +189,7 @@ impl Session {
 
     /// F1ごとに探索し直し、再検証後に一回だけフォーカスを要求する。
     fn perform(&self, request: Request, trace: &mut Trace, outcome: &mut Outcome) -> Result<()> {
-        if request.context.app != App::ChatGpt {
+        if !crate::TARGET_SCOPE.allows(request.context.app) {
             return Err("unsupported_app");
         }
         trace.stage = "search";
@@ -223,8 +229,10 @@ impl Session {
             request,
             outcome,
             "CompareElements(document)",
-            self.automation
-                .CompareElements(&initial_document, &target.regions[3])
+            self.automation.CompareElements(
+                &initial_document,
+                target.regions.last().ok_or("missing_document_region")?
+            )
         )?
         .as_bool()
         {
@@ -233,6 +241,9 @@ impl Session {
         trace.stage = "revalidate";
         // 再検索も同じ総期限内。追加候補と領域差し替えを直前に検出する。
         let checked = self.search(&root, request, trace, outcome)?;
+        if target.regions.len() != checked.regions.len() {
+            return Err("region_count_changed");
+        }
         for (before, after) in std::iter::once((&target.element, &checked.element))
             .chain(target.regions.iter().zip(&checked.regions))
         {
@@ -270,6 +281,12 @@ impl Session {
             return Err("target_no_longer_editable");
         }
         outcome.revalidated = true;
+        // 同じ検索・再検証を読み取りだけで試し、書込み経路へ到達させない。
+        if crate::inspect_only() {
+            guard(request, trace, outcome)?;
+            trace.record(format_args!("inspect_only=true provisional_rule_match=true semantic_identity_proven=false no_focus_text_enter_ime_writes=true"));
+            return Ok(());
+        }
         trace.stage = "focus.set";
         guard(request, trace, outcome)?;
         let started = Instant::now();
@@ -437,6 +454,9 @@ impl Session {
         outcome: &mut Outcome,
     ) -> Result<()> {
         let checked = self.search(root, request, trace, outcome)?;
+        if target.regions.len() != checked.regions.len() {
+            return Err("region_count_changed");
+        }
         for (before, after) in std::iter::once((&target.element, &checked.element))
             .chain(target.regions.iter().zip(&checked.regions))
         {

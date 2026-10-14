@@ -99,3 +99,11 @@ cargo build --locked --release --bin iris --target x86_64-pc-windows-msvc
 ## Claudeの限定読み取り診断
 
 [祖先経路診断 v2](PATH_PROBE.md) は別artifact `iris-path-probe-windows-x64` の `iris-path-probe.exe` です。Claudeの手動フォーカスした空のEditから前面ルートまで最大64要素の型・IsControlElement・ClassNameを表示し、AutomationIdは有無だけに留めます。ClassNameにも私的情報が含まれる可能性があるため共有前に確認してください。自動保存・送信・フォーカス移動・IME書込みはありません。通常版・オート版の対象拡張ではなく、会話欄識別条件を検討する診断です。Windows実機は未検証です。
+
+## Claudeオート送信の暫定試作
+
+[オート送信試作 v2](AUTO_SEND_PROBE.md) は、既存dotsに加え、二会話で観測したClaudeの完全Classトークンと祖先順序を使用します。前面限定・探索完了・ルール一致一件・フォーカス後と入力直前の同一対象再検証を要求し、未検出の救済・自動再試行は行いません。深さやfocused状態は条件にしません。
+
+確認済みの通常会話画面で、**送信してよい空欄・未確定IMEなし**を利用者が確認する暫定試作です。検索・メッセージ編集など未確認モードへの一般化、再起動後や更新後の識別保証はありません。検証とSendInput間の競合も完全には防げません。Claudeでのフォーカスから送信・IME復元までの統合動作は未検証です。通常版とフォーカス専用試作の対象は変更しません。
+
+同じexeを `iris-auto-send-probe.exe --inspect` として起動すれば同じ構造ルールの読み取り検証だけを行い、SetFocus・IME・入力前に終了します。**引数なしでは実際にOKとEnterを送信します。** どちらも本文や入力値、生Classをログ収集しません。

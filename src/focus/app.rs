@@ -423,7 +423,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
     match uia::Session::new() {
         Ok(mut session) => {
             if crate::AUTO_SEND {
-                println!("req=0 key=- app=- stage=ready ms=0 F1=focus_verify_send_OK_Enter ChatGPT_only=true empty_input_and_no_composition_required=true");
+                println!("req=0 key=- app=- stage=ready ms=0 F1=run_selected_mode targets=ChatGPT.exe,Claude.exe default_mode=send inspect_flag=--inspect empty_input_and_no_composition_required=true");
             } else if crate::AUTO_FOCUS {
                 println!("req=0 key=- app=- stage=ready ms=0 F1=auto_focus ChatGPT_only=true no_text_enter_ime_writes=true");
             } else if crate::PATH_ONLY {
@@ -452,7 +452,7 @@ pub fn run() {
     println!("Iris build: {}", crate::build_info::ID);
     diagnostic::initialize_clock();
     if crate::AUTO_SEND {
-        println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v1 sends_OK_Enter=true provisional_dots_rule=true stop_normal_iris_first=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v2 default_mode=send inspect_flag=--inspect provisional_app_rules=true stop_normal_iris_first=true console_Enter=exit");
     } else if crate::AUTO_FOCUS {
         println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v3 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else if crate::PATH_ONLY {

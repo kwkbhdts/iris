@@ -97,7 +97,7 @@ impl Session {
             "ClassName",
             node.CurrentClassName()
         )?;
-        Ok(rules::markers(&class)?.editor)
+        Ok(rules::markers(rules::Profile::for_app(request.context.app)?, &class)?.editor)
     }
 
     /// Raw祖先の順序・文書・前面ルートを検証し、領域のUIA参照を保持する。
@@ -110,7 +110,7 @@ impl Session {
         outcome: &mut Outcome,
     ) -> Result<Option<Vec<IUIAutomationElement>>> {
         let mut node = node.clone();
-        let mut path = rules::Ancestors::default();
+        let mut path = rules::Ancestors::new(rules::Profile::for_app(request.context.app)?);
         let mut regions = Vec::new();
         for depth in 0..rules::ANCESTOR_LIMIT {
             let same = call!(
@@ -141,7 +141,10 @@ impl Session {
                     node.CurrentClassName()
                 )?;
                 if path
-                    .advance(rules::markers(&class)?, kind == UIA_DocumentControlTypeId)
+                    .advance(
+                        rules::markers(rules::Profile::for_app(request.context.app)?, &class)?,
+                        kind == UIA_DocumentControlTypeId,
+                    )
                     .is_some()
                 {
                     regions.push(node.clone());

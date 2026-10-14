@@ -1,10 +1,18 @@
-# Iris dots向け一回押し送信試作 v1
+# Iris 一回押し送信試作 v2（dots / Claude暫定）
 
-**このexeは `OK` と Enter を実際に送ります。** `iris-auto-send-probe.exe` は ChatGPT Desktop内dotsの通常画面向けの独立試作です。F1一回で入力欄探索→SetFocus→新しい対象検証→IME確認→一度の入力投入を行います。F2登録は不要です。通常manual版、既存focus-only版は残します。Windows実機での統合動作は未検証です。
+**引数なしで起動したこのexeは `OK` と Enter を実際に送ります。** `iris-auto-send-probe.exe` は ChatGPT Desktop内dotsと、確認済みClaude Desktop会話画面向けの独立試作です。F1一回で入力欄探索→SetFocus→新しい対象検証→IME確認→一度の入力投入を行います。F2登録は不要です。通常manual版、既存focus-only版は残します。Windows実機での統合動作は未検証です。
+
+## 同じexeで読み取りだけを試す
+
+`iris-auto-send-probe.exe --inspect` として起動すると `mode=inspect no_focus_text_enter_ime_writes=true` を表示します。このモードは起動時に固定し、送信モードへの自動移行はありません。未知の引数・誤記・重複指定では起動を拒否します。**引数なしは送信モード**です。
+
+同じF1で、送信時と同じ候補検索・構造照合・同一Document・対象と全必須領域の再検索照合・属性再検証を行い、SetFocus前に終了します。SetFocus・IME操作・文字／Enter送信はありません。実フォーカスが候補Editそのものである必要はなく、同じDocumentの本文から試せます。移動・ホイールの許容や他の介入での中断条件も送信モードと同じです。
+
+別会話の本文クリック状態、再起動後、検索画面で各一回F1を押し、処理終了後にログを確認します。`result=OBSERVED` は暫定ルールの再検証完了、`INCOMPLETE` は不一致・候補なし・複数・中断等です。`input_attempted=false`、`set_focus=not_called` を維持します。ClassNameの生値・本文・入力文字を出力しません。成功でも意味上の会話欄識別や実送信時の動作を証明しません。
 
 ## 半角・日本語を各一回だけ試す
 
-1. **送信してよい試験用dots会話**を用意し、通常版・古い試作を終了します。このexeを通常権限で起動し、`build=auto-send-v1` / `sends_OK_Enter=true` / `stage=ready` を確認します。
+1. **送信してよい試験用dots／Claude会話**を用意し、通常版・古い試作を終了します。このexeを通常権限で起動し、`mode=send` / `build=auto-send-v2` / `stage=ready` を確認します。
 2. 入力欄が**空、IME未確定文字なし**と確認し、半角の状態にして会話本文をクリック。修飾キーなしのF1を一回押して離し、約2秒、他キー・クリックを操作せず待ちます。非注入と確認できたマウス移動・縦横ホイールだけは探索開始から復元まで許容します。Enterキーも離してください。
 3. `OK` が一回送られたか・フォーカスが戻ったか・IME状態を手動確認します。ログの起動行〜`stage=end` と「半角／目視結果」を記録します。
 4. 異常や手動確認要求がない場合だけ、空欄を確認して日本語IMEオン・未確定文字なしにし、同じ操作を一回。送信後にIMEが元へ戻ったかも確認します。
@@ -13,7 +21,11 @@
 
 ## 探索と限定した移行条件
 
-前面 `ChatGPT.exe` 内で、Control Viewの操作可能な非password・非offscreen Editを検索します。`ProseMirror` の完全空白トークン、Raw祖先の `conversation-footer` → `thread-pane` → 同一要素上の `messaging-root` + `messaging-embedded` → Document → 前面ルートという順序を確認します。深度・focusedクラス・CSSハッシュ・動的IDは固定しません。候補は厳密に一つ、開始時フォーカスも同じDocument所属が必要です。SetFocus直前にも再検索・領域比較し、SetFocusは一回だけです。
+前面 `ChatGPT.exe` または `Claude.exe` 内で、Control Viewの操作可能な非password・非offscreen Editを検索します。ChatGPTでは `ProseMirror` の完全空白トークン、Raw祖先の `conversation-footer` → `thread-pane` → 同一要素上の `messaging-root` + `messaging-embedded` → Document → 前面ルートという順序を確認します。深度・focusedクラス・CSSハッシュ・動的IDは固定しません。候補は厳密に一つ、開始時フォーカスも同じDocument所属が必要です。SetFocus直前にも再検索・領域比較し、SetFocusは一回だけです。
+
+ClaudeではEdit自身に完全トークン `tiptap` と `ProseMirror`、別々のRaw祖先に `epitaxy-chat-panel` → `tiles-shell` → `dframe-pane-primary` → `chat-ui-core` → Document → 前面ルートを要求します。中間Groupの追加を許容し、固定depth・`ProseMirror-focused`・切断したトークンは条件にしません。全文のClassNameが4096 UTF-16単位を超える、不正UTF-16、取得失敗なら中断します。診断版の128単位表示切断から値を推測して照合することはありません。
+
+**Claudeルールは二つの会話入力欄の属性観測に基づく暫定条件です。** 検索画面のEdit 0件は観測済みですが、今回の構造条件で検索画面が常に拒否される証明ではありません。再起動後の候補1件は以前観測しましたが、Classトークンの再起動耐性は未確認です。確認済みの通常会話画面・送信してよい空欄だけで試し、メッセージ編集・検索・別パネルなど未確認モードへ一般化しないでください。ルールは意味上の会話欄判定やサービス認証を保証しません。未検出・曖昧・属性変化では送信せず、その要求を終了します。自動再探索や救済はありません。
 
 SetFocus後に次のどちらかの場合のみ、新しい送信前検証へ移ります。
 
@@ -26,7 +38,7 @@ SetFocus後に次のどちらかの場合のみ、新しい送信前検証へ移
 
 ## 送信直前とIME
 
-前面・一意な構造一致候補・同じ入力要素・footer/thread/messaging/Document・実フォーカスを改めて検証します。その後、新しいWin32フォーカス／IME所有者／レイアウトのスナップショットを取得します。F1押下前の古いフォーカスはIME処理へ流用しません。
+前面・一意な構造一致候補・同じ入力要素・アプリごとの全必須領域とDocument・実フォーカスを改めて検証します。その後、新しいWin32フォーカス／IME所有者／レイアウトのスナップショットを取得します。F1押下前の古いフォーカスはIME処理へ流用しません。
 
 既存manual版と同じモデル・Win32バックエンドで、元IME応答0ならオフ確認のみ、1なら一時オフと応答確認、不明なら入力しません。**IME操作後、SendInput直前にもUIAの全候補検索・領域比較・実フォーカス確認を行い**、さらにWin32対象・固定世代・期限・レイアウトを照合して既存SendInputを呼びます。
 
@@ -51,7 +63,7 @@ F1長押しは一要求です。処理中に次の入力を予約せず、長押
 
 - **空欄・未確定IMEなしは利用者の確認条件**です。本文・入力値を読まないため検査しません。条件が違えば既存文字への追記や未確定文字の確定・取消・送信が起こり得ます。legacy IME応答はTSF全体の状態保証ではありません。
 - 同じプロセス内の手動操作が限定した2通知と同じ形になる可能性を排除できません。確認とSendInputは不可分ではなく、SendInputは特定ウィンドウ宛てではありません。最後の確認直後の切替による誤送信、同じHWND内の変化、送信後のアプリ動作は完全には防げません。
-- 構造ルールは一回のdots属性観測に基づく暫定版です。他画面との非一致や将来の更新耐性は保証しません。URL・サービス識別ではなく、他アプリや通常ChatGPTへの展開は対象外です。
+- ChatGPTの構造ルールは一回のdots属性観測、Claudeは二会話の属性観測に基づく暫定版です。他画面との非一致や将来の更新耐性は保証しません。URL・サービス識別ではなく、ブラウザーや通常ChatGPTへの展開は対象外です。
 - 通常権限のみで、昇格・UIAccess回避はしません。既に要求した入力やIME変更は取り消せず、強制終了時の復元も保証しません。
 - Name・Value・Textの内容・タイトル・URL・AutomationId・ARIA自由文は取得しません。構造照合にClassNameは読みますが文字列は出力せず、固定分類・数値・真偽値・HRESULTのみをログにします。通信・ログファイル・自動アップロード・自動起動・設定エンジンはありません。
 

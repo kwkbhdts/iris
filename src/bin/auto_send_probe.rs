@@ -1,5 +1,18 @@
+#[cfg(windows)]
+static INSPECT_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// 起動時だけ選んだ読み取りモードを、要求中には変更しない。
+#[cfg(windows)]
+fn inspect_only() -> bool {
+    *INSPECT_ONLY.get().expect("mode initialized before hooks")
+}
+
 #[cfg(any(windows, test))]
-const TARGET_SCOPE: diagnostic::TargetScope = diagnostic::TargetScope::ChatGptOnly;
+#[path = "../auto_send/mode.rs"]
+mod mode;
+
+#[cfg(any(windows, test))]
+const TARGET_SCOPE: diagnostic::TargetScope = diagnostic::TargetScope::AutoSend;
 
 #[cfg(windows)]
 #[path = "../build_info.rs"]
@@ -70,7 +83,22 @@ mod writer;
 /// 通常版とは別のコンソールで登録なしでフォーカス確認後の一回送信を試す。
 fn main() {
     #[cfg(windows)]
-    app::run();
+    {
+        let args: Vec<_> = std::env::args_os().skip(1).collect();
+        let inspect = match mode::parse(&args) {
+            Ok(value) => value,
+            Err(()) => {
+                eprintln!("Usage: iris-auto-send-probe.exe [--inspect]");
+                std::process::exit(2);
+            }
+        };
+        INSPECT_ONLY.set(inspect).expect("mode initialized once");
+        println!(
+            "mode={} no_focus_text_enter_ime_writes={inspect}",
+            if inspect { "inspect" } else { "send" }
+        );
+        app::run();
+    }
     #[cfg(not(windows))]
     {
         eprintln!("Iris auto-send probe は Windows 専用です。");

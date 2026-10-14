@@ -61,6 +61,7 @@ pub enum TargetScope {
     ReadOnlyDiscovery,
     ChatGptOnly,
     ClaudePath,
+    AutoSend,
 }
 
 impl TargetScope {
@@ -71,6 +72,7 @@ impl TargetScope {
             Self::ReadOnlyDiscovery => matches!(app, App::ChatGpt | App::Claude),
             Self::ChatGptOnly => app == App::ChatGpt,
             Self::ClaudePath => app == App::Claude,
+            Self::AutoSend => matches!(app, App::ChatGpt | App::Claude),
         }
     }
 }
@@ -206,6 +208,10 @@ mod tests {
             );
             assert_eq!(TargetScope::ChatGptOnly.allows(app), app == App::ChatGpt);
             assert_eq!(TargetScope::ClaudePath.allows(app), app == App::Claude);
+            assert_eq!(
+                TargetScope::AutoSend.allows(app),
+                matches!(app, App::ChatGpt | App::Claude)
+            );
         }
     }
 
@@ -216,6 +222,7 @@ mod tests {
             "iris-focus-probe" => TargetScope::RegisteredFocus,
             "iris-discovery-probe" => TargetScope::ReadOnlyDiscovery,
             "iris-path-probe" => TargetScope::ClaudePath,
+            "iris-auto-send-probe" => TargetScope::AutoSend,
             _ => TargetScope::ChatGptOnly,
         };
         assert_eq!(crate::TARGET_SCOPE, expected);
