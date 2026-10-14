@@ -1,6 +1,6 @@
 use crate::{
     app::{self, Request},
-    diagnostic::{App, Trace},
+    diagnostic::Trace,
     path_format, policy,
 };
 use std::sync::atomic::Ordering;
@@ -49,7 +49,7 @@ macro_rules! read {
     }};
 }
 
-/// 許可した三つの識別属性だけを有界表示し、未知と省略を明示する。
+/// ClassNameだけを有界表示し、未知と省略を明示する。
 fn string_field(
     name: &'static str,
     value: windows::core::Result<BSTR>,
@@ -134,7 +134,7 @@ impl Session {
 
     /// 先に前面ルートへの所属を確かめ、その一本だけの属性を取得する。
     fn inspect(&self, request: Request, trace: &mut Trace) -> Result<()> {
-        if request.context.app != App::ChatGpt {
+        if !crate::TARGET_SCOPE.allows(request.context.app) {
             return Err("unsupported_app");
         }
         trace.stage = "reference";
@@ -210,28 +210,26 @@ impl Session {
                 read!(trace, request, node.CurrentClassName()),
                 &mut complete,
             );
-            let id = string_field(
-                "automation_id",
-                read!(trace, request, node.CurrentAutomationId()),
+            // IDは有無への変換後に解放し、生値を表示用バッファへ渡さない。
+            let id_result = read!(trace, request, node.CurrentAutomationId());
+            let id = match id_result {
+                Ok(value) => path_format::presence(Some(&value)),
+                Err(error) => {
+                    complete = false;
+                    trace.record(format_args!(
+                        "api=AutomationId hr=0x{:08X}",
+                        error.code().0 as u32
+                    ));
+                    path_format::presence(None)
+                }
+            };
+            let control = bool_field(
+                "is_control_element",
+                read!(trace, request, node.CurrentIsControlElement()),
                 &mut complete,
             );
-            let framework = string_field(
-                "framework_id",
-                read!(trace, request, node.CurrentFrameworkId()),
-                &mut complete,
-            );
-            let control_result = read!(trace, request, node.CurrentIsControlElement());
-            let content_result = read!(trace, request, node.CurrentIsContentElement());
-            // Content View所属には両プロパティがtrueであることが必要。
-            let content_view = control_result
-                .as_ref()
-                .ok()
-                .zip(content_result.as_ref().ok())
-                .map(|(control, content)| control.as_bool() && content.as_bool());
-            let control = bool_field("control_view", control_result, &mut complete);
-            let content = bool_field("content_view_property", content_result, &mut complete);
             guard(request, trace)?;
-            trace.record(format_args!("depth={depth} control_type={} root_match={} {class} {id} {framework} {control} {content} content_view={content_view:?}", kind.0, depth + 1 == path.len()));
+            trace.record(format_args!("depth={depth} control_type={} root_match={} {class} automation_id_present={id} {control}", kind.0, depth + 1 == path.len()));
         }
         let actual_result = read!(trace, request, self.automation.GetFocusedElement());
         let actual = api(trace, "GetFocusedElement(final)", actual_result)?;

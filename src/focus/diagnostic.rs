@@ -60,6 +60,7 @@ pub enum TargetScope {
     RegisteredFocus,
     ReadOnlyDiscovery,
     ChatGptOnly,
+    ClaudePath,
 }
 
 impl TargetScope {
@@ -69,6 +70,7 @@ impl TargetScope {
             Self::RegisteredFocus => true,
             Self::ReadOnlyDiscovery => matches!(app, App::ChatGpt | App::Claude),
             Self::ChatGptOnly => app == App::ChatGpt,
+            Self::ClaudePath => app == App::Claude,
         }
     }
 }
@@ -193,7 +195,7 @@ mod tests {
         assert_eq!(relative_mono_us(mono_ns(start), mono_ns(end)), Some(-19500));
         assert_eq!(relative_mono_us(u64::MAX, 0), None);
     }
-    /// Claudeの追加は読み取りdiscoveryだけ。登録型の四アプリと他試作の制限を維持する。
+    /// 読み取り診断の対象と、登録型・送信試作の制限を別々に固定する。
     #[test]
     fn target_scopes_keep_browser_and_write_paths_separate() {
         for app in [App::Claude, App::ChatGpt, App::Chrome, App::Firefox] {
@@ -203,6 +205,7 @@ mod tests {
                 matches!(app, App::Claude | App::ChatGpt)
             );
             assert_eq!(TargetScope::ChatGptOnly.allows(app), app == App::ChatGpt);
+            assert_eq!(TargetScope::ClaudePath.allows(app), app == App::Claude);
         }
     }
 
@@ -212,6 +215,7 @@ mod tests {
         let expected = match env!("CARGO_BIN_NAME") {
             "iris-focus-probe" => TargetScope::RegisteredFocus,
             "iris-discovery-probe" => TargetScope::ReadOnlyDiscovery,
+            "iris-path-probe" => TargetScope::ClaudePath,
             _ => TargetScope::ChatGptOnly,
         };
         assert_eq!(crate::TARGET_SCOPE, expected);

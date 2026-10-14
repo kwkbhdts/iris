@@ -95,3 +95,7 @@ cargo build --locked --release --bin iris --target x86_64-pc-windows-msvc
 
 縦ホイール（`WM_MOUSEWHEEL`）・横ホイール（`WM_MOUSEHWHEEL`）は非注入・既知の場合だけ許容します。
 通常版はDOM/UIAの可視性を検査しません。オート送信版はスクロール後も候補一意性・可視性・有効性・実フォーカスを送信直前に再検証します。
+
+## Claudeの限定読み取り診断
+
+[祖先経路診断 v2](PATH_PROBE.md) は別artifact `iris-path-probe-windows-x64` の `iris-path-probe.exe` です。Claudeの手動フォーカスした空のEditから前面ルートまで最大64要素の型・IsControlElement・ClassNameを表示し、AutomationIdは有無だけに留めます。ClassNameにも私的情報が含まれる可能性があるため共有前に確認してください。自動保存・送信・フォーカス移動・IME書込みはありません。通常版・オート版の対象拡張ではなく、会話欄識別条件を検討する診断です。Windows実機は未検証です。

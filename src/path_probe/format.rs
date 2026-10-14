@@ -34,9 +34,27 @@ pub fn render(value: &[u16]) -> Rendered {
     }
 }
 
+/// IDの内容・長さ・ハッシュを出さず、有無と取得不能だけを返す。
+pub fn presence(value: Option<&[u16]>) -> &'static str {
+    match value {
+        Some([]) => "false",
+        Some(_) => "true",
+        None => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 私的なIDでも出力は固定の真偽値だけとし、空と失敗を区別する。
+    #[test]
+    fn identity_output_is_only_presence() {
+        let private: Vec<u16> = "private-id\nsecret".encode_utf16().collect();
+        assert_eq!(presence(Some(&private)), "true");
+        assert_eq!(presence(Some(&[])), "false");
+        assert_eq!(presence(None), "unknown");
+    }
 
     /// メタデータ内の制御文字が新しいログ行や端末命令にならない。
     #[test]

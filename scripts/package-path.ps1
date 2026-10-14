@@ -33,3 +33,7 @@ $lines = foreach ($name in @('iris-path-probe.exe', 'PATH_PROBE.md', 'THIRD_PART
     "$hash  $name"
 }
 $lines | Set-Content dist-path/SHA256SUMS.txt -Encoding utf8NoBOM
+
+# ZIPへ渡すファイルの過不足と、同梱SHA-256を独立に検証する。
+python "$PSScriptRoot/verify-package.py" dist-path iris-path-probe.exe PATH_PROBE.md
+if ($LASTEXITCODE -ne 0) { throw 'package verification failed' }

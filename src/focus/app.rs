@@ -427,7 +427,8 @@ fn worker(receiver: mpsc::Receiver<Request>) {
             } else if crate::AUTO_FOCUS {
                 println!("req=0 key=- app=- stage=ready ms=0 F1=auto_focus ChatGPT_only=true no_text_enter_ime_writes=true");
             } else if crate::PATH_ONLY {
-                println!("req=0 key=- app=- stage=ready ms=0 F1=inspect_path ChatGPT_only=true metadata_strings_visible=true review_before_sharing=true no_focus_text_enter_ime_writes=true");
+                println!("注意: ClassNameには私的な情報が含まれる場合があります。共有前に表示内容を確認してください。ローカル表示のみで、自動保存・送信は行いません。");
+                println!("req=0 key=- app=- stage=ready ms=0 F1=inspect_path targets=Claude.exe class_name_visible=true automation_id_presence_only=true review_before_sharing=true no_focus_text_enter_ime_writes=true");
             } else if crate::DISCOVERY_ONLY {
                 println!("req=0 key=- app=- stage=ready ms=0 F1=inspect targets=ChatGPT.exe,Claude.exe raw_identity_output=false no_focus_text_enter_ime_writes=true");
             } else {
@@ -455,7 +456,7 @@ pub fn run() {
     } else if crate::AUTO_FOCUS {
         println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v3 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else if crate::PATH_ONLY {
-        println!("req=0 key=- app=- stage=start ms=0 build=path-readonly-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true local_display_only=true review_before_sharing=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=claude-path-readonly-v2 stop_normal_iris_first=true no_uncommitted_ime_text=true local_display_only=true review_before_sharing=true console_Enter=exit");
     } else if crate::DISCOVERY_ONLY {
         println!("req=0 key=- app=- stage=start ms=0 build=discovery-readonly-v3 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else {

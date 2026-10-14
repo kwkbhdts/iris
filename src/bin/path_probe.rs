@@ -1,5 +1,5 @@
 #[cfg(any(windows, test))]
-const TARGET_SCOPE: diagnostic::TargetScope = diagnostic::TargetScope::ChatGptOnly;
+const TARGET_SCOPE: diagnostic::TargetScope = diagnostic::TargetScope::ClaudePath;
 
 #[cfg(windows)]
 #[path = "../build_info.rs"]
