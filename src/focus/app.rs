@@ -223,7 +223,7 @@ fn refresh() {
     let current = foreground();
     let target = current
         .and_then(|w| identify(w).map(|app| (w, app)))
-        .filter(|&(_, app)| !crate::DISCOVERY_ONLY || app == App::ChatGpt)
+        .filter(|&(_, app)| crate::TARGET_SCOPE.allows(app))
         .filter(|_| foreground() == current);
     STATE.with(|s| {
         let mut borrow = s.borrow_mut();
@@ -429,7 +429,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
             } else if crate::PATH_ONLY {
                 println!("req=0 key=- app=- stage=ready ms=0 F1=inspect_path ChatGPT_only=true metadata_strings_visible=true review_before_sharing=true no_focus_text_enter_ime_writes=true");
             } else if crate::DISCOVERY_ONLY {
-                println!("req=0 key=- app=- stage=ready ms=0 F1=inspect ChatGPT_only=true no_focus_text_enter_ime_writes=true");
+                println!("req=0 key=- app=- stage=ready ms=0 F1=inspect targets=ChatGPT.exe,Claude.exe raw_identity_output=false no_focus_text_enter_ime_writes=true");
             } else {
                 println!("req=0 key=- app=- stage=ready ms=0 F2=register F1=focus no_text_enter_ime_writes=true");
             }
@@ -457,7 +457,7 @@ pub fn run() {
     } else if crate::PATH_ONLY {
         println!("req=0 key=- app=- stage=start ms=0 build=path-readonly-v1 stop_normal_iris_first=true no_uncommitted_ime_text=true local_display_only=true review_before_sharing=true console_Enter=exit");
     } else if crate::DISCOVERY_ONLY {
-        println!("req=0 key=- app=- stage=start ms=0 build=discovery-readonly-v2 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=discovery-readonly-v3 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else {
         println!("req=0 key=- app=- stage=start ms=0 build=focus-diagnostics-v4 stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     }

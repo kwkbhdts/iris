@@ -63,6 +63,14 @@ pub fn walk<T: Tree>(
     }
 }
 
+/// 比較用の一時値から真偽だけを返し、空同士や取得不能を同値扱いしない。
+pub fn same_nonempty(a: Option<&[u16]>, b: Option<&[u16]>) -> Option<bool> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(!a.is_empty() && !b.is_empty() && a == b),
+        _ => None,
+    }
+}
+
 /// 診断上の一候補を、完了前や正解未検出時に一意と呼ばない。
 pub fn unique(
     complete: bool,
@@ -165,5 +173,18 @@ mod tests {
         assert!(!unique(true, true, 2, 1));
         assert!(!unique(true, true, 1, 0));
         assert!(unique(true, true, 1, 1));
+    }
+    /// ID/Classの生値を戻さず、同値・別値・空・取得不能を区別する。
+    #[test]
+    fn identity_comparison_returns_only_known_nonempty_equality() {
+        let a: Vec<u16> = "private sample\nnot for logs".encode_utf16().collect();
+        let b: Vec<u16> = "different sample".encode_utf16().collect();
+        assert_eq!(same_nonempty(Some(&a), Some(&a)), Some(true));
+        assert_eq!(same_nonempty(Some(&a), Some(&b)), Some(false));
+        assert_eq!(same_nonempty(Some(&[]), Some(&[])), Some(false));
+        assert_eq!(same_nonempty(Some(&a), Some(&[])), Some(false));
+        assert_eq!(same_nonempty(None, Some(&a)), None);
+        assert_eq!(same_nonempty(Some(&a), None), None);
+        assert_eq!(same_nonempty(None, None), None);
     }
 }

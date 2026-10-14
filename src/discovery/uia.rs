@@ -1,13 +1,13 @@
 use crate::{
     app::{self, Request},
-    diagnostic::{App, Trace},
+    diagnostic::Trace,
     policy,
     scan::{self, Tree},
 };
 use scan::Result;
 use std::sync::atomic::Ordering;
 use windows::{
-    core::{IUnknown, Interface, BSTR},
+    core::{Interface, BSTR},
     Win32::{Foundation::HWND, System::Com::*, UI::Accessibility::*},
 };
 
@@ -76,33 +76,6 @@ fn navigate(
     Ok(element)
 }
 
-/// パターンの存在だけを照会し、ValueやTextの内容は読まない。
-fn pattern(
-    node: &IUIAutomationElement,
-    id: UIA_PATTERN_ID,
-    request: Request,
-    trace: &mut Trace,
-) -> Result<Option<bool>> {
-    guard(request, trace)?;
-    let mut raw = std::ptr::null_mut();
-    let hr = unsafe { (node.vtable().GetCurrentPattern)(node.as_raw(), id, &mut raw) };
-    let present = !raw.is_null();
-    if present {
-        drop(unsafe { IUnknown::from_raw(raw) });
-    }
-    if hr.is_ok() {
-        Ok(Some(present))
-    } else if hr.0 as u32 == UIA_E_NOTSUPPORTED {
-        Ok(Some(false))
-    } else {
-        trace.record(format_args!(
-            "pattern_id={} hr=0x{:08X} available=unknown",
-            id.0, hr.0 as u32
-        ));
-        Ok(None)
-    }
-}
-
 struct Identity {
     id: Option<BSTR>,
     class: Option<BSTR>,
@@ -121,14 +94,7 @@ fn identity(node: &IUIAutomationElement, request: Request, trace: &mut Trace) ->
     .ok();
     Ok(Identity { id, class })
 }
-/// 空文字列同士を識別根拠として数えない。
-fn same_nonempty(a: &Option<BSTR>, b: &Option<BSTR>) -> Option<bool> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(!a.is_empty() && !b.is_empty() && a == b),
-        _ => None,
-    }
-}
-/// 自由文を取得せず、編集条件とパターン対応をまとめる。
+/// 自由文や対応パターンを取得せず、必要な編集条件だけを調べる。
 fn attributes(node: &IUIAutomationElement, request: Request, trace: &mut Trace) -> Result<bool> {
     let enabled = read!(trace, request, "IsEnabled", node.CurrentIsEnabled())?.as_bool();
     let focusable = read!(
@@ -140,10 +106,9 @@ fn attributes(node: &IUIAutomationElement, request: Request, trace: &mut Trace) 
     .as_bool();
     let offscreen = read!(trace, request, "IsOffscreen", node.CurrentIsOffscreen())?.as_bool();
     let password = read!(trace, request, "IsPassword", node.CurrentIsPassword())?.as_bool();
-    let value = pattern(node, UIA_ValuePatternId, request, trace)?;
-    let text = pattern(node, UIA_TextPatternId, request, trace)?;
-    let text2 = pattern(node, UIA_TextPattern2Id, request, trace)?;
-    trace.record(format_args!("enabled={enabled} focusable={focusable} offscreen={offscreen} password={password} value_pattern={value:?} text_pattern={text:?} text2_pattern={text2:?}"));
+    trace.record(format_args!(
+        "enabled={enabled} focusable={focusable} offscreen={offscreen}"
+    ));
     Ok(policy::editable(
         true, enabled, focusable, offscreen, password,
     ))
@@ -204,8 +169,9 @@ impl Tree for Survey<'_> {
             trace.record(format_args!("edit={} node={index} parent={parent:?} depth={depth} in_document={in_document} control_type={} same_reference={same}", self.edits, kind.0));
             let eligible = attributes(node, request, trace)? && in_document;
             let identity = identity(node, request, trace)?;
-            let id_same = same_nonempty(&identity.id, &self.identity.id);
-            let class_same = same_nonempty(&identity.class, &self.identity.class);
+            let id_same = scan::same_nonempty(identity.id.as_deref(), self.identity.id.as_deref());
+            let class_same =
+                scan::same_nonempty(identity.class.as_deref(), self.identity.class.as_deref());
             trace.record(format_args!("candidate={eligible} automation_id_present={:?} class_name_present={:?} id_same_reference={id_same:?} class_same_reference={class_same:?}", identity.id.as_ref().map(|v| !v.is_empty()), identity.class.as_ref().map(|v| !v.is_empty())));
             if eligible {
                 self.candidates += 1;
@@ -266,7 +232,7 @@ impl Session {
     }
     /// 観測したフォーカスの祖先とルートを調べ、非Editも正解扱いせず列挙へ進む。
     fn inspect(&self, request: Request, trace: &mut Trace) -> Result<()> {
-        if request.context.app != App::ChatGpt {
+        if !crate::TARGET_SCOPE.allows(request.context.app) {
             return Err("unsupported_app");
         }
         trace.stage = "reference";

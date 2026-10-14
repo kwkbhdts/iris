@@ -1,3 +1,6 @@
+#[cfg(any(windows, test))]
+const TARGET_SCOPE: diagnostic::TargetScope = diagnostic::TargetScope::RegisteredFocus;
+
 #[cfg(windows)]
 #[path = "../build_info.rs"]
 mod build_info;

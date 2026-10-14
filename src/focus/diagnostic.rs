@@ -54,6 +54,25 @@ impl App {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TargetScope {
+    RegisteredFocus,
+    ReadOnlyDiscovery,
+    ChatGptOnly,
+}
+
+impl TargetScope {
+    /// 読み取り診断の拡張を、フォーカス・送信試作の許可へ波及させない。
+    pub fn allows(self, app: App) -> bool {
+        match self {
+            Self::RegisteredFocus => true,
+            Self::ReadOnlyDiscovery => matches!(app, App::ChatGpt | App::Claude),
+            Self::ChatGptOnly => app == App::ChatGpt,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Context {
     pub id: u64,
@@ -173,5 +192,28 @@ mod tests {
         assert_eq!(relative_mono_us(mono_ns(end), mono_ns(start)), Some(19500));
         assert_eq!(relative_mono_us(mono_ns(start), mono_ns(end)), Some(-19500));
         assert_eq!(relative_mono_us(u64::MAX, 0), None);
+    }
+    /// Claudeの追加は読み取りdiscoveryだけ。登録型の四アプリと他試作の制限を維持する。
+    #[test]
+    fn target_scopes_keep_browser_and_write_paths_separate() {
+        for app in [App::Claude, App::ChatGpt, App::Chrome, App::Firefox] {
+            assert!(TargetScope::RegisteredFocus.allows(app));
+            assert_eq!(
+                TargetScope::ReadOnlyDiscovery.allows(app),
+                matches!(app, App::Claude | App::ChatGpt)
+            );
+            assert_eq!(TargetScope::ChatGptOnly.allows(app), app == App::ChatGpt);
+        }
+    }
+
+    /// 各exeで実際に選んだ許可リストもバイナリ名に対して固定する。
+    #[test]
+    fn binary_uses_its_expected_target_scope() {
+        let expected = match env!("CARGO_BIN_NAME") {
+            "iris-focus-probe" => TargetScope::RegisteredFocus,
+            "iris-discovery-probe" => TargetScope::ReadOnlyDiscovery,
+            _ => TargetScope::ChatGptOnly,
+        };
+        assert_eq!(crate::TARGET_SCOPE, expected);
     }
 }
