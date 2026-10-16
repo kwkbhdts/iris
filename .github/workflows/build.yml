@@ -113,3 +113,15 @@ jobs:
           path: dist-auto-send/*
           if-no-files-found: error
           retention-days: 14
+      - name: Build read-only candidate count prototype
+        run: cargo build --locked --release --features focus-probe --bin iris-candidate-probe --target x86_64-pc-windows-msvc
+      - name: Package read-only candidate count prototype
+        shell: pwsh
+        run: ./scripts/package-candidate.ps1
+      - name: Upload read-only candidate count prototype
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iris-candidate-probe-windows-x64
+          path: dist-candidate/*
+          if-no-files-found: error
+          retention-days: 14

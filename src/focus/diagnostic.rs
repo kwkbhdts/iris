@@ -62,13 +62,14 @@ pub enum TargetScope {
     ChatGptOnly,
     ClaudePath,
     AutoSend,
+    CandidateCount,
 }
 
 impl TargetScope {
     /// 読み取り診断の拡張を、フォーカス・送信試作の許可へ波及させない。
     pub fn allows(self, app: App) -> bool {
         match self {
-            Self::RegisteredFocus => true,
+            Self::RegisteredFocus | Self::CandidateCount => true,
             Self::ReadOnlyDiscovery => matches!(app, App::ChatGpt | App::Claude),
             Self::ChatGptOnly => app == App::ChatGpt,
             Self::ClaudePath => app == App::Claude,
@@ -202,6 +203,7 @@ mod tests {
     fn target_scopes_keep_browser_and_write_paths_separate() {
         for app in [App::Claude, App::ChatGpt, App::Chrome, App::Firefox] {
             assert!(TargetScope::RegisteredFocus.allows(app));
+            assert!(TargetScope::CandidateCount.allows(app));
             assert_eq!(
                 TargetScope::ReadOnlyDiscovery.allows(app),
                 matches!(app, App::Claude | App::ChatGpt)
@@ -223,6 +225,7 @@ mod tests {
             "iris-discovery-probe" => TargetScope::ReadOnlyDiscovery,
             "iris-path-probe" => TargetScope::ClaudePath,
             "iris-auto-send-probe" => TargetScope::AutoSend,
+            "iris-candidate-probe" => TargetScope::CandidateCount,
             _ => TargetScope::ChatGptOnly,
         };
         assert_eq!(crate::TARGET_SCOPE, expected);

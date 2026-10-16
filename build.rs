@@ -99,6 +99,7 @@ fn main() {
         "iris-path-probe",
         "iris-auto-focus-probe",
         "iris-auto-send-probe",
+        "iris-candidate-probe",
     ] {
         let mut resource = if bin == "iris" {
             icons.clone()

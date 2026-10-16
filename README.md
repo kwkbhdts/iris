@@ -111,3 +111,9 @@ cargo build --locked --release --bin iris --target x86_64-pc-windows-msvc
 オート版v3はChatGPT・Claudeと `--inspect` のすべてで、開始時フォーカスのDocument制約を外し、前面の最上位ウィンドウから探索します。候補自身のDocument・既知祖先構造・前面ルート所属を必須とし、開始時フォーカスの途中変化は引き続き中断します。候補探索の前後、移動前、送信前・IME復元前には、明示された画面内UIAダイアログ／モーダルも拒否します。
 
 UIAがダイアログ属性を公開しない検索パネル等は、この拒否条件では検出できず、背後の会話欄が採用され得ます。検索結果0件はオーバーレイ不存在の証明ではありません。初期Document制約撤廃による対象範囲の拡大と、この限界を踏まえ、検索・編集モードは読み取り検証に留めてください。ID/Classの推測や自動再試行は追加していません。
+
+## 4アプリ共通のEdit候補数を観測する
+
+[読み取り専用候補数診断](CANDIDATE_PROBE.md) の `iris-candidate-probe.exe` は、ChatGPT・Claude・Firefox・Chromeの前面ルート配下でEdit・画面内・有効・フォーカス可能・非passwordの5条件だけを数えます。Class、Document、IsControlElement、初期フォーカスで絞らず、アドレスバーも除外しません。0件・1件・複数・未完了と、公開ダイアログ/modalによる対象不可を区別します。
+
+送信・フォーカス移動・IME書込みは一切なく、既存オート版の対象拡大もしていません。候補1件は会話欄や空欄の証明ではありません。UIA未公開の要素・オーバーレイは検出できない限界があります。Windows実機は未検証です。公開承認後のCIでは別artifact `iris-candidate-probe-windows-x64` を使用します。
