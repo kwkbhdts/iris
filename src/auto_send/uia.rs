@@ -29,6 +29,7 @@ impl Drop for Apartment {
 pub struct Session {
     automation: IUIAutomation2,
     condition: IUIAutomationCondition,
+    blocker_condition: IUIAutomationCondition,
     walker: IUIAutomationTreeWalker,
     _apartment: Apartment,
 }
@@ -142,10 +143,27 @@ impl Session {
                     .CreateAndCondition(&condition, &part)
                     .map_err(|_| "condition_init")?;
             }
+            // 既知の文字列ではなく、UIAが明示するダイアログ／モーダル状態を使う。
+            let dialog = automation
+                .CreatePropertyCondition(UIA_IsDialogPropertyId, &VARIANT::from(true))
+                .map_err(|_| "blocker_condition_init")?;
+            let modal = automation
+                .CreatePropertyCondition(UIA_WindowIsModalPropertyId, &VARIANT::from(true))
+                .map_err(|_| "blocker_condition_init")?;
+            let blocker = automation
+                .CreateOrCondition(&dialog, &modal)
+                .map_err(|_| "blocker_condition_init")?;
+            let onscreen = automation
+                .CreatePropertyCondition(UIA_IsOffscreenPropertyId, &VARIANT::from(false))
+                .map_err(|_| "blocker_condition_init")?;
+            let blocker_condition = automation
+                .CreateAndCondition(&blocker, &onscreen)
+                .map_err(|_| "blocker_condition_init")?;
             let walker = automation.RawViewWalker().map_err(|_| "walker_init")?;
             Ok(Self {
                 automation,
                 condition,
+                blocker_condition,
                 walker,
                 _apartment: apartment,
             })
@@ -209,8 +227,7 @@ impl Session {
             "GetFocusedElement(initial)",
             self.automation.GetFocusedElement()
         )?;
-        let initial_document = self.document(&initial, &root, request, trace, outcome)?;
-        let target = match self.search(&root, request, trace, outcome) {
+        let target = match self.search_root(&root, request, trace, outcome) {
             Ok(value) => {
                 outcome.search = "unique";
                 value
@@ -224,23 +241,9 @@ impl Session {
                 return Err(reason);
             }
         };
-        if !call!(
-            trace,
-            request,
-            outcome,
-            "CompareElements(document)",
-            self.automation.CompareElements(
-                &initial_document,
-                target.regions.last().ok_or("missing_document_region")?
-            )
-        )?
-        .as_bool()
-        {
-            return Err("different_document");
-        }
         trace.stage = "revalidate";
         // 再検索も同じ総期限内。追加候補と領域差し替えを直前に検出する。
-        let checked = self.search(&root, request, trace, outcome)?;
+        let checked = self.search_root(&root, request, trace, outcome)?;
         if target.regions.len() != checked.regions.len() {
             return Err("region_count_changed");
         }
@@ -280,6 +283,7 @@ impl Session {
         if !self.editor(&target.element, request, trace, outcome)? {
             return Err("target_no_longer_editable");
         }
+        self.unblocked(&root, request, trace, outcome)?;
         outcome.revalidated = true;
         // 同じ検索・再検証を読み取りだけで試し、書込み経路へ到達させない。
         if crate::inspect_only() {
@@ -453,7 +457,7 @@ impl Session {
         trace: &mut Trace,
         outcome: &mut Outcome,
     ) -> Result<()> {
-        let checked = self.search(root, request, trace, outcome)?;
+        let checked = self.search_root(root, request, trace, outcome)?;
         if target.regions.len() != checked.regions.len() {
             return Err("region_count_changed");
         }
@@ -482,9 +486,13 @@ impl Session {
             outcome.verification_failed = true;
             return Err("send_focus_changed");
         }
+        self.unblocked(root, request, trace, outcome)?;
         guard(request, trace, outcome)
     }
 }
 
 #[path = "../auto_focus/search.rs"]
 mod search;
+
+#[path = "scope_uia.rs"]
+mod scope_uia;

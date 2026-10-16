@@ -8,6 +8,10 @@ fn inspect_only() -> bool {
 }
 
 #[cfg(any(windows, test))]
+#[path = "../auto_send/root_search.rs"]
+mod root_search;
+
+#[cfg(any(windows, test))]
 #[path = "../auto_send/mode.rs"]
 mod mode;
 

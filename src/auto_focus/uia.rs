@@ -88,6 +88,49 @@ macro_rules! call {
 }
 
 impl Session {
+    /// 本文側のフォーカスが同じ前面ルート内のどの文書に属するか確認する。
+    fn document(
+        &self,
+        node: &IUIAutomationElement,
+        root: &IUIAutomationElement,
+        request: Request,
+        trace: &mut Trace,
+        outcome: &mut Outcome,
+    ) -> Result<IUIAutomationElement> {
+        let mut node = node.clone();
+        let mut document = None;
+        for depth in 0..rules::ANCESTOR_LIMIT {
+            if call!(
+                trace,
+                request,
+                outcome,
+                "CompareElements(initial_root)",
+                self.automation.CompareElements(&node, root)
+            )?
+            .as_bool()
+            {
+                return document.ok_or("initial_focus_outside_document");
+            }
+            let kind = call!(
+                trace,
+                request,
+                outcome,
+                "ControlType(initial)",
+                node.CurrentControlType()
+            )?;
+            if document.is_none() && kind == UIA_DocumentControlTypeId {
+                document = Some(node.clone());
+            }
+            if depth + 1 == rules::ANCESTOR_LIMIT {
+                return Err("initial_ancestor_limit");
+            }
+            node = self
+                .parent(&node, request, trace, outcome)?
+                .ok_or("initial_root_not_reached")?;
+        }
+        Err("initial_ancestor_limit")
+    }
+
     /// 固定のControl View Edit条件を専用MTA内で用意する。
     pub fn new() -> Result<Self> {
         unsafe {

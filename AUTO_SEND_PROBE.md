@@ -1,18 +1,18 @@
-# Iris 一回押し送信試作 v2（dots / Claude暫定）
+# Iris 一回押し送信試作 v3（dots / Claude暫定）
 
-**引数なしで起動したこのexeは `OK` と Enter を実際に送ります。** `iris-auto-send-probe.exe` は ChatGPT Desktop内dotsと、確認済みClaude Desktop会話画面向けの独立試作です。F1一回で入力欄探索→SetFocus→新しい対象検証→IME確認→一度の入力投入を行います。F2登録は不要です。通常manual版、既存focus-only版は残します。Windows実機での統合動作は未検証です。
+**引数なしで起動したこのexeは `OK` と Enter を実際に送ります。** `iris-auto-send-probe.exe` は ChatGPT Desktop内dotsと、確認済みClaude Desktop会話画面向けの独立試作です。F1一回で入力欄探索→SetFocus→新しい対象検証→IME確認→一度の入力投入を行います。F2登録は不要です。通常manual版、既存focus-only版は残します。旧v2（0.1.0.33）はClaudeで送信成功の利用者報告があります。日本語モードの実際の復元は未確認です。今回のv3の動作はWindows実機未検証です。
 
 ## 同じexeで読み取りだけを試す
 
 `iris-auto-send-probe.exe --inspect` として起動すると `mode=inspect no_focus_text_enter_ime_writes=true` を表示します。このモードは起動時に固定し、送信モードへの自動移行はありません。未知の引数・誤記・重複指定では起動を拒否します。**引数なしは送信モード**です。
 
-同じF1で、送信時と同じ候補検索・構造照合・同一Document・対象と全必須領域の再検索照合・属性再検証を行い、SetFocus前に終了します。SetFocus・IME操作・文字／Enter送信はありません。実フォーカスが候補Editそのものである必要はなく、同じDocumentの本文から試せます。移動・ホイールの許容や他の介入での中断条件も送信モードと同じです。
+同じF1で、送信時と同じ候補検索・構造照合・候補自身のDocument・対象と全必須領域の再検索照合・属性再検証を行い、SetFocus前に終了します。SetFocus・IME操作・文字／Enter送信はありません。初期フォーカスが候補Editや同じDocumentに属する必要はなく、アプリ外枠やサイドバーからも前面ルート全体を探索します。取得した初期フォーカスが探索中に変わった場合は介入として停止します。移動・ホイールの許容や他の介入での中断条件も送信モードと同じです。
 
 別会話の本文クリック状態、再起動後、検索画面で各一回F1を押し、処理終了後にログを確認します。`result=OBSERVED` は暫定ルールの再検証完了、`INCOMPLETE` は不一致・候補なし・複数・中断等です。`input_attempted=false`、`set_focus=not_called` を維持します。ClassNameの生値・本文・入力文字を出力しません。成功でも意味上の会話欄識別や実送信時の動作を証明しません。
 
 ## 半角・日本語を各一回だけ試す
 
-1. **送信してよい試験用dots／Claude会話**を用意し、通常版・古い試作を終了します。このexeを通常権限で起動し、`mode=send` / `build=auto-send-v2` / `stage=ready` を確認します。
+1. **送信してよい試験用dots／Claude会話**を用意し、通常版・古い試作を終了します。このexeを通常権限で起動し、`mode=send` / `build=auto-send-v3` / `stage=ready` を確認します。
 2. 入力欄が**空、IME未確定文字なし**と確認し、半角の状態にして会話本文をクリック。修飾キーなしのF1を一回押して離し、約2秒、他キー・クリックを操作せず待ちます。非注入と確認できたマウス移動・縦横ホイールだけは探索開始から復元まで許容します。Enterキーも離してください。
 3. `OK` が一回送られたか・フォーカスが戻ったか・IME状態を手動確認します。ログの起動行〜`stage=end` と「半角／目視結果」を記録します。
 4. 異常や手動確認要求がない場合だけ、空欄を確認して日本語IMEオン・未確定文字なしにし、同じ操作を一回。送信後にIMEが元へ戻ったかも確認します。
@@ -21,11 +21,21 @@
 
 ## 探索と限定した移行条件
 
-前面 `ChatGPT.exe` または `Claude.exe` 内で、Control Viewの操作可能な非password・非offscreen Editを検索します。ChatGPTでは `ProseMirror` の完全空白トークン、Raw祖先の `conversation-footer` → `thread-pane` → 同一要素上の `messaging-root` + `messaging-embedded` → Document → 前面ルートという順序を確認します。深度・focusedクラス・CSSハッシュ・動的IDは固定しません。候補は厳密に一つ、開始時フォーカスも同じDocument所属が必要です。SetFocus直前にも再検索・領域比較し、SetFocusは一回だけです。
+前面 `ChatGPT.exe` または `Claude.exe` 内で、Control Viewの操作可能な非password・非offscreen Editを検索します。ChatGPTでは `ProseMirror` の完全空白トークン、Raw祖先の `conversation-footer` → `thread-pane` → 同一要素上の `messaging-root` + `messaging-embedded` → Document → 前面ルートという順序を確認します。深度・focusedクラス・CSSハッシュ・動的IDは固定しません。既知ルールに一致する候補は厳密に一つ必要です。開始時フォーカスのDocument所属は要求せず、候補自身の祖先にDocumentがあり、前面ルートへ到達することを必須にします。SetFocus直前にも再検索・領域比較し、SetFocusは一回だけです。
 
 ClaudeではEdit自身に完全トークン `tiptap` と `ProseMirror`、別々のRaw祖先に `epitaxy-chat-panel` → `tiles-shell` → `dframe-pane-primary` → `chat-ui-core` → Document → 前面ルートを要求します。中間Groupの追加を許容し、固定depth・`ProseMirror-focused`・切断したトークンは条件にしません。全文のClassNameが4096 UTF-16単位を超える、不正UTF-16、取得失敗なら中断します。診断版の128単位表示切断から値を推測して照合することはありません。
 
 **Claudeルールは二つの会話入力欄の属性観測に基づく暫定条件です。** 検索画面のEdit 0件は観測済みですが、今回の構造条件で検索画面が常に拒否される証明ではありません。再起動後の候補1件は以前観測しましたが、Classトークンの再起動耐性は未確認です。確認済みの通常会話画面・送信してよい空欄だけで試し、メッセージ編集・検索・別パネルなど未確認モードへ一般化しないでください。ルールは意味上の会話欄判定やサービス認証を保証しません。未検出・曖昧・属性変化では送信せず、その要求を終了します。自動再探索や救済はありません。
+
+### 検索・ダイアログの背後にある候補
+
+前面HWNDが最上位（GA_ROOT）であることを確認し、owner側の別ウィンドウへ探索を広げません。候補検索の前後で同じUIAルートであることとルートの有効性を確認し、前面ルート自身と全子孫から `IsOffscreen=false` かつ `IsDialog=true` またはWindowパターンの `IsModal=true` の要素を検索します。Control Viewや候補の祖先だけには限定しないため、候補の兄弟領域に公開されたダイアログも拒否します。1件以上なら `visible_dialog_or_modal`、API失敗や不正件数でも停止し、0件へ読み替えません。
+
+この確認を初回・SetFocus前の再検索・移動後・入力直前・IME復元前の再検索に適用し、各書込み段階前の検証末尾でも再確認します。`--inspect` も同じ検証を実行します。明示的な阻害要素が見つかっても閉じたり迂回したりしません。追加検索も既存の総期限内で、期限延長・自動再試行はありません。
+
+**拒否できるのは、UIAプロバイダーがこの属性で公開する画面内ダイアログ／モーダル要素です。** 属性未対応や未公開オーバーレイを、検索結果0件から「ダイアログなし」と証明することはできません。通常の検索パネルや非モーダルUIの背後に既知会話欄が残り、上記属性も公開されない場合は通過し得ます。`IsOffscreen=false` は他のUIに覆われていない保証でもありません。未知のID/Classや画面用途は推測しません。`unreported_overlay_state=unknown` を表示し、検索・編集モードでの実送信は引き続き対象外です。初期Document制約を外したぶん、以前そこで止まった画面でも通過し得る変更です。
+
+根拠はMicrosoftの [IsDialog](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-automation-element-propids) と [Window IsModal](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nf-uiautomationclient-iuiautomationwindowpattern-get_currentismodal) の定義です。両アプリでの属性公開・検索画面の拒否・追加照会時間は実機未検証です。読み取りモードで通常会話の本文／サイドバー／外枠、検索画面、ダイアログを各一回比較し、背後に会話欄があるときのログも確認してください。生Class・本文・画面のスクリーンショットは不要です。
 
 SetFocus後に次のどちらかの場合のみ、新しい送信前検証へ移ります。
 
