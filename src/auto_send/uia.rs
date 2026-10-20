@@ -407,7 +407,7 @@ impl Session {
                 consumed: false,
                 evidence: model::guard::Evidence::UNKNOWN,
             };
-            let result = if crate::selected_mode() == crate::mode::Mode::NoImeChatGpt {
+            let result = if crate::selected_mode().uses_no_ime() {
                 crate::comparison::no_ime(&mut backend)
             } else if observe {
                 let mut sample = |phase, open| recorder.phase(phase, open);

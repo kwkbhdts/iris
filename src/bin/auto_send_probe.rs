@@ -115,7 +115,7 @@ fn main() {
         let mode = match mode::parse(&args) {
             Ok(value) => value,
             Err(()) => {
-                eprintln!("Usage: iris-auto-send-probe.exe [--inspect | --observe-ime | --no-ime-chatgpt]");
+                eprintln!("Usage: iris-auto-send-probe.exe [--inspect | --observe-ime | --no-ime-chatgpt | --no-ime-desktop]");
                 std::process::exit(2);
             }
         };
