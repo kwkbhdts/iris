@@ -21,6 +21,7 @@ pub struct Observation {
     pub complete: bool,
     pub document: Option<bool>,
     pub reason: &'static str,
+    pub parent_missing_depth: Option<usize>,
 }
 
 impl Observation {
@@ -31,6 +32,7 @@ impl Observation {
             complete: false,
             document: None,
             reason,
+            parent_missing_depth: None,
         }
     }
 }
@@ -59,6 +61,7 @@ pub fn inspect<T: Tree>(tree: &mut T, candidate: T::Node) -> Observation {
                     complete: true,
                     document: Some(document),
                     reason: "none",
+                    parent_missing_depth: None,
                 }
             }
             Err(reason) => return Observation::unknown(reason),
@@ -69,7 +72,12 @@ pub fn inspect<T: Tree>(tree: &mut T, candidate: T::Node) -> Observation {
         }
         node = match tree.parent(&node) {
             Ok(Some(parent)) => parent,
-            Ok(None) => return Observation::unknown("root_not_reached"),
+            Ok(None) => {
+                return Observation {
+                    parent_missing_depth: Some(depth),
+                    ..Observation::unknown("root_not_reached")
+                }
+            }
             Err(reason) => return Observation::unknown(reason),
         };
     }
@@ -147,7 +155,8 @@ mod tests {
                     root_reached: true,
                     complete: true,
                     document: Some(expected),
-                    reason: "none"
+                    reason: "none",
+                    parent_missing_depth: None
                 }
             );
         }
@@ -158,10 +167,22 @@ mod tests {
     fn unfinished_paths_are_unknown() {
         let mut t = tree();
         t.end = 2;
-        assert_eq!(inspect(&mut t, 0), Observation::unknown("root_not_reached"));
+        assert_eq!(
+            inspect(&mut t, 0),
+            Observation {
+                parent_missing_depth: Some(t.end),
+                ..Observation::unknown("root_not_reached")
+            }
+        );
         let mut t = tree();
         t.end = 0;
-        assert_eq!(inspect(&mut t, 0), Observation::unknown("root_not_reached"));
+        assert_eq!(
+            inspect(&mut t, 0),
+            Observation {
+                parent_missing_depth: Some(t.end),
+                ..Observation::unknown("root_not_reached")
+            }
+        );
         let mut t = tree();
         t.getter_error = true;
         assert_eq!(inspect(&mut t, 0), Observation::unknown("uia_error"));

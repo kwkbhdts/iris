@@ -5,6 +5,9 @@ mod ancestry;
 #[path = "../candidates/condition.rs"]
 mod candidate_condition;
 #[cfg(any(windows, test))]
+#[path = "../auto_send/failure.rs"]
+mod failure;
+#[cfg(any(windows, test))]
 #[path = "../auto_send/restore.rs"]
 mod restore;
 #[cfg(any(windows, test))]

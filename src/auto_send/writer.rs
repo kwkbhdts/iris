@@ -549,7 +549,12 @@ mod regression {
                         return true;
                     }
                     record(&events, wheel, Truth::False);
-                    crate::restore::tests::validate_case(changed)
+                    let valid = crate::restore::tests::validate_case(changed);
+                    if !valid {
+                        // 追加診断が全一致を返しても、元の拒否結果を維持する。
+                        assert!(crate::failure::tests::matching_sample().complete);
+                    }
+                    valid
                 };
                 let inner = Script {
                     events: &events,

@@ -224,6 +224,12 @@ pub struct ImeBackend {
 }
 
 impl ImeBackend {
+    /// 失敗後の読取り診断へ、変更前の保存済み識別情報だけを渡す。
+    #[allow(dead_code)]
+    pub fn identity_snapshot(&self) -> (Snapshot, WindowId, usize) {
+        (self.snapshot, self.ime, self.layout)
+    }
+
     /// 不成立の理由だけを保存し、判定結果は変えない。
     fn failed(&mut self, reason: Reason) -> bool {
         self.evidence.current = reason;
@@ -445,4 +451,22 @@ pub fn prepare_auto(target: WindowId) -> Result<ImeBackend, &'static str> {
 /// UI 側の期限確認にも同じ基準を使う。
 pub fn expired(request: Request) -> bool {
     unsafe { GetTickCount() }.wrapping_sub(request.snapshot.at) > DEADLINE_MS
+}
+
+/// 診断専用に現在の入力先を読み、取得不能をNoneに保つ。書込みは行わない。
+#[allow(dead_code)]
+pub fn read_identity() -> (
+    Option<WindowId>,
+    Option<WindowId>,
+    Option<WindowId>,
+    Option<usize>,
+) {
+    let foreground = window_id(unsafe { GetForegroundWindow() }).ok();
+    let focus = foreground.and_then(|w| focused(w).ok());
+    let ime = focus.and_then(|w| window_id(unsafe { ImmGetDefaultIMEWnd(w.hwnd as HWND) }).ok());
+    let layout = focus.and_then(|w| {
+        let value = unsafe { GetKeyboardLayout(w.tid) } as usize;
+        (value != 0).then_some(value)
+    });
+    (foreground, focus, ime, layout)
 }

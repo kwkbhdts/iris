@@ -174,7 +174,7 @@ impl Session {
             element.clone(),
         );
         trace.record(format_args!(
-            "root_reached={} ancestry_complete={} has_document_ancestor={} reason={}",
+            "root_reached={} ancestry_complete={} has_document_ancestor={} reason={} parent_missing_depth={:?}",
             observed.root_reached,
             observed.complete,
             match observed.document {
@@ -183,7 +183,8 @@ impl Session {
                 Some(false) => "false",
                 None => "unknown",
             },
-            observed.reason
+            observed.reason,
+            observed.parent_missing_depth
         ));
         if !observed.complete || !observed.root_reached {
             return Err(observed.reason);

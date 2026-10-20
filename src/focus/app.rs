@@ -456,7 +456,7 @@ pub fn run() {
     if crate::TARGET_SCOPE == crate::diagnostic::TargetScope::CandidateCount {
         println!("req=0 key=- app=- stage=start ms=0 build=candidate-count-readonly-v2 stop_other_iris_first=true console_Enter=exit no_focus_text_enter_ime_writes=true");
     } else if crate::AUTO_SEND {
-        println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v5 default_mode=send inspect_flag=--inspect candidate_rules=basic5_browser_document semantic_identity_proven=false stop_normal_iris_first=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v6 default_mode=send inspect_flag=--inspect candidate_rules=basic5_browser_document semantic_identity_proven=false stop_normal_iris_first=true console_Enter=exit");
     } else if crate::AUTO_FOCUS {
         println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v3 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else if crate::PATH_ONLY {

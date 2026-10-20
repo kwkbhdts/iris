@@ -347,6 +347,7 @@ impl Session {
         })?;
         guard(request, trace, outcome)?;
         let permitted = outcome.permitted;
+        let saved_identity = inner.identity_snapshot();
         let quick = || app::check_send(request, permitted).is_ok();
         let result = {
             let mut validate = |stage| {
@@ -368,6 +369,16 @@ impl Session {
                         trace.record(format_args!(
                             "target_precheck=false stage={stage:?} reason={reason}"
                         ));
+                        if stage == writer::ValidationStage::Restore {
+                            self.diagnose_restore_failure(
+                                &target,
+                                &root,
+                                request,
+                                permitted,
+                                saved_identity,
+                                trace,
+                            );
+                        }
                         false
                     }
                 }
@@ -452,3 +463,6 @@ mod scope_uia;
 
 #[path = "restore_uia.rs"]
 mod restore_uia;
+
+#[path = "failure_uia.rs"]
+mod failure_uia;
