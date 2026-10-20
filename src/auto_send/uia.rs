@@ -184,7 +184,7 @@ impl Session {
             } else {
                 "INCOMPLETE"
             }
-        } else if input.attempted && input.inserted == model::INPUT_COUNT {
+        } else if input.attempted && input.inserted == crate::selected_mode().input_plan().count() {
             "INPUT_ENQUEUED"
         } else if input.attempted {
             "INPUT_PARTIAL_OR_FAILED"
@@ -355,6 +355,8 @@ impl Session {
             tid: request.window.tid,
         })?;
         guard(request, trace, outcome)?;
+        let inner = inner.with_input_plan(crate::selected_mode().input_plan());
+        trace.record(format_args!("planned_input_events={} planned_enter_presses={} planned_batches=1 added_enter_delay_ms=0 app_consumption=unknown",crate::selected_mode().input_plan().count(),if crate::selected_mode().input_plan()==model::InputPlan::TwoEnters {2} else {1}));
         let permitted = outcome.permitted;
         let saved_identity = inner.identity_snapshot();
         let observe = crate::selected_mode() == crate::mode::Mode::ObserveIme;
@@ -408,7 +410,7 @@ impl Session {
                 evidence: model::guard::Evidence::UNKNOWN,
             };
             let result = if crate::selected_mode().uses_no_ime() {
-                crate::comparison::no_ime(&mut backend)
+                crate::comparison::no_ime_plan(&mut backend, crate::selected_mode().input_plan())
             } else if observe {
                 let mut sample = |phase, open| recorder.phase(phase, open);
                 let mut observed = crate::comparison::Observed {

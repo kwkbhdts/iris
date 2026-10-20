@@ -4,7 +4,13 @@ use crate::{
 };
 
 /// IME操作を呼ばず、既存Writerの送信検証を通して一回だけ投入する。
+#[allow(dead_code)] // 既存一回方式の回帰試験にも使う。
 pub fn no_ime(backend: &mut impl Backend) -> Outcome {
+    no_ime_plan(backend, model::InputPlan::SingleEnter)
+}
+
+/// 選択済みの列を一括で一度だけ送る。途中結果による追加投入はしない。
+pub fn no_ime_plan(backend: &mut impl Backend, plan: model::InputPlan) -> Outcome {
     let mut out = Outcome {
         status: "comparison_no_input; ime_untouched",
         manual: false,
@@ -19,7 +25,7 @@ pub fn no_ime(backend: &mut impl Backend) -> Outcome {
     if !input.attempted {
         return out;
     }
-    if input.inserted != model::INPUT_COUNT {
+    if input.inserted != plan.count() {
         out.status = "input_partial_or_failed; no_retry; restore_skipped";
         out.manual = true;
     } else if !backend.guarded() {
@@ -346,6 +352,72 @@ mod tests {
             ImeReply::Raw(1),
             ImeReply::Raw(25)
         ));
+    }
+
+    /// 8件の一括投入でもWriterの一回制約を使い、部分投入を再試行しない。
+    #[test]
+    fn two_enters_one_batch_no_ime_no_retry() {
+        use crate::writer::{ValidationStage, Writer};
+        for count in 0..=8 {
+            let mut inner = Fake::new();
+            inner.inserted = count;
+            let mut stages = vec![];
+            let mut validate = |s| {
+                stages.push(s);
+                true
+            };
+            let mut b = Writer {
+                inner,
+                quick: &|| true,
+                validate: &mut validate,
+                failed: false,
+                consumed: false,
+                evidence: model::guard::Evidence::UNKNOWN,
+            };
+            let out = no_ime_plan(&mut b, model::InputPlan::TwoEnters);
+            assert_eq!(out.manual, count != 8);
+            assert_eq!(out.input.unwrap().inserted, count);
+            assert_eq!(
+                out.diagnostic(),
+                if count == 8 { "IRIS-C000" } else { "IRIS-I104" }
+            );
+            assert!(!no_ime_plan(&mut b, model::InputPlan::TwoEnters)
+                .input
+                .is_some_and(|r| r.attempted));
+            assert_eq!(b.inner.calls, ["input"]);
+            drop(b);
+            assert_eq!(stages, [ValidationStage::Send]);
+        }
+    }
+    /// 対象検証拒否・介入・終了では2回比較も投入しない。
+    #[test]
+    fn two_enters_requires_existing_guards() {
+        use crate::writer::Writer;
+        for (quick, valid, closing, validation) in [
+            (false, true, false, true),
+            (true, false, false, true),
+            (true, true, true, true),
+            (true, true, false, false),
+        ] {
+            let mut inner = Fake::new();
+            inner.valid = valid;
+            inner.closing = closing;
+            inner.inserted = 8;
+            let quick = || quick;
+            let mut validate = |_| validation;
+            let mut b = Writer {
+                inner,
+                quick: &quick,
+                validate: &mut validate,
+                failed: false,
+                consumed: false,
+                evidence: model::guard::Evidence::UNKNOWN,
+            };
+            assert!(!no_ime_plan(&mut b, model::InputPlan::TwoEnters)
+                .input
+                .is_some_and(|r| r.attempted));
+            assert!(b.inner.calls.is_empty());
+        }
     }
 
     struct Clock {

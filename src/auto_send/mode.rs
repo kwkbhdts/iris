@@ -8,19 +8,33 @@ pub enum Mode {
     ObserveIme,
     NoImeChatGpt,
     NoImeDesktop,
+    NoImeDesktopTwoEnters,
 }
 impl Mode {
     /// 明示比較だけを指定アプリに限定し、ブラウザーへ広げない。
     pub fn allows(self, app: App) -> bool {
         match self {
             Self::NoImeChatGpt => app == App::ChatGpt,
-            Self::NoImeDesktop => matches!(app, App::ChatGpt | App::Claude),
+            Self::NoImeDesktop | Self::NoImeDesktopTwoEnters => {
+                matches!(app, App::ChatGpt | App::Claude)
+            }
             _ => true,
         }
     }
     /// 互換指定とデスクトップ指定は、同じ一回送信経路を使う。
     pub fn uses_no_ime(self) -> bool {
-        matches!(self, Self::NoImeChatGpt | Self::NoImeDesktop)
+        matches!(
+            self,
+            Self::NoImeChatGpt | Self::NoImeDesktop | Self::NoImeDesktopTwoEnters
+        )
+    }
+    /// 既存指定は6イベント、新しい明示比較だけ8イベントにする。
+    pub fn input_plan(self) -> crate::model::InputPlan {
+        if self == Self::NoImeDesktopTwoEnters {
+            crate::model::InputPlan::TwoEnters
+        } else {
+            crate::model::InputPlan::SingleEnter
+        }
     }
     /// 起動時の固定モード名を返す。
     pub fn label(self) -> &'static str {
@@ -30,6 +44,7 @@ impl Mode {
             Self::ObserveIme => "observe-ime",
             Self::NoImeChatGpt => "no-ime-chatgpt",
             Self::NoImeDesktop => "no-ime-desktop",
+            Self::NoImeDesktopTwoEnters => "no-ime-desktop-two-enters",
         }
     }
 }
@@ -41,6 +56,7 @@ pub fn parse(args: &[OsString]) -> Result<Mode, ()> {
         [arg] if arg == "--observe-ime" => Ok(Mode::ObserveIme),
         [arg] if arg == "--no-ime-chatgpt" => Ok(Mode::NoImeChatGpt),
         [arg] if arg == "--no-ime-desktop" => Ok(Mode::NoImeDesktop),
+        [arg] if arg == "--no-ime-desktop-two-enters" => Ok(Mode::NoImeDesktopTwoEnters),
         _ => Err(()),
     }
 }
@@ -71,15 +87,30 @@ mod tests {
                 [true, true, false, false],
                 true,
             ),
+            (
+                "--no-ime-desktop-two-enters",
+                Mode::NoImeDesktopTwoEnters,
+                [true, true, false, false],
+                true,
+            ),
         ] {
             assert_eq!(parse(&[flag.into()]), Ok(mode));
             assert!(!mode.label().is_empty());
             assert_eq!(mode.uses_no_ime(), no_ime);
+            assert_eq!(
+                mode.input_plan().count(),
+                if flag == "--no-ime-desktop-two-enters" {
+                    8
+                } else {
+                    6
+                }
+            );
             for other in [
                 "--inspect",
                 "--observe-ime",
                 "--no-ime-chatgpt",
                 "--no-ime-desktop",
+                "--no-ime-desktop-two-enters",
             ] {
                 assert!(parse(&[flag.into(), other.into()]).is_err());
             }
@@ -91,6 +122,7 @@ mod tests {
             }
         }
         assert!(!Mode::Send.uses_no_ime());
+        assert_eq!(Mode::Send.input_plan().count(), 6);
         for app in [App::ChatGpt, App::Claude, App::Firefox, App::Chrome] {
             assert!(Mode::Send.allows(app));
         }

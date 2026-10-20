@@ -51,7 +51,7 @@ impl<B: Backend> Backend for Writer<'_, B> {
     fn set_open(&mut self, open: bool) -> ImeReply {
         self.inner.set_open(open)
     }
-    /// IMEオフ後に対象を再探索し、通った場合だけ既存の6イベント一括送信を呼ぶ。
+    /// 入力直前に対象を再検証し、通った場合だけ選択済み固定列を一括送信する。
     fn send_once(&mut self) -> InputReply {
         if self.consumed || self.closing() || !self.guarded() {
             return InputReply {

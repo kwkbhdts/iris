@@ -216,6 +216,7 @@ fn key_input(vk: u16, scan: u16, flags: u32) -> INPUT {
 }
 
 pub struct ImeBackend {
+    input_plan: model::InputPlan,
     snapshot: Snapshot,
     epoch: u64,
     ime: WindowId,
@@ -224,6 +225,13 @@ pub struct ImeBackend {
 }
 
 impl ImeBackend {
+    /// 明示比較の入力列だけを選ぶ。通常の準備ではEnter1回を維持する。
+    #[allow(dead_code)]
+    pub fn with_input_plan(mut self, plan: model::InputPlan) -> Self {
+        self.input_plan = plan;
+        self
+    }
+
     /// 後追い観測にも準備時の履歴を渡す。世代を更新しない。
     #[allow(dead_code)]
     pub fn observation_epoch(&self) -> u64 {
@@ -318,7 +326,7 @@ impl Backend for ImeBackend {
     fn set_open(&mut self, open: bool) -> ImeReply {
         message(self.ime, IMC_SETOPENSTATUS, isize::from(open))
     }
-    /// 一括投入直前にも対象と終了要求を確認する。追加の Enter や再送は行わない。
+    /// 一括投入直前に対象と終了を確認し、選択した固定列を一度だけ投入する。
     fn send_once(&mut self) -> InputReply {
         if self.closing() || !self.guarded() || unsafe { GetAsyncKeyState(VK_RETURN as i32) } < 0 {
             return InputReply {
@@ -326,14 +334,16 @@ impl Backend for ImeBackend {
                 inserted: 0,
             };
         }
-        let inputs = [
-            key_input(0, 'O' as u16, KEYEVENTF_UNICODE),
-            key_input(0, 'O' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
-            key_input(0, 'K' as u16, KEYEVENTF_UNICODE),
-            key_input(0, 'K' as u16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
-            key_input(VK_RETURN, 0, 0),
-            key_input(VK_RETURN, 0, KEYEVENTF_KEYUP),
-        ];
+        let mut storage = [INPUT::default(); 8];
+        let events = self.input_plan.events();
+        for (slot, &(key, up)) in storage.iter_mut().zip(events) {
+            let release = if up { KEYEVENTF_KEYUP } else { 0 };
+            *slot = match key {
+                model::InputKey::Unicode(value) => key_input(0, value, KEYEVENTF_UNICODE | release),
+                model::InputKey::Enter => key_input(VK_RETURN, 0, release),
+            };
+        }
+        let inputs = &storage[..events.len()];
         unsafe {
             SetLastError(0);
             let inserted = SendInput(
@@ -432,6 +442,7 @@ fn prepare_backend(request: Request) -> Result<ImeBackend, &'static str> {
         return Err("ime_owner_or_layout_unknown");
     }
     Ok(ImeBackend {
+        input_plan: model::InputPlan::SingleEnter,
         snapshot: request.snapshot,
         epoch: request.epoch,
         ime,

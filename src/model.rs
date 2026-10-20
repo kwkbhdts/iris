@@ -14,6 +14,42 @@ pub const RESTORE_DELAY_MS: u32 = 100;
 pub const DEADLINE_MS: u32 = 500;
 pub const INPUT_COUNT: u32 = 6;
 
+/// 通常はEnter1回。2回は明示比較だけで選ぶ固定入力列。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputPlan {
+    SingleEnter,
+    #[allow(dead_code)] // 通常トレイ版は比較列を選ばない。
+    TwoEnters,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKey {
+    Unicode(u16),
+    Enter,
+}
+impl InputPlan {
+    /// OKは一度だけ、各キーの押下・解放を順に一括投入する。
+    pub fn events(self) -> &'static [(InputKey, bool)] {
+        const EVENTS: [(InputKey, bool); 8] = [
+            (InputKey::Unicode('O' as u16), false),
+            (InputKey::Unicode('O' as u16), true),
+            (InputKey::Unicode('K' as u16), false),
+            (InputKey::Unicode('K' as u16), true),
+            (InputKey::Enter, false),
+            (InputKey::Enter, true),
+            (InputKey::Enter, false),
+            (InputKey::Enter, true),
+        ];
+        &EVENTS[..self.count() as usize]
+    }
+    /// 投入確認はモード固有の全イベント数と照合する。
+    pub fn count(self) -> u32 {
+        match self {
+            Self::SingleEnter => INPUT_COUNT,
+            Self::TwoEnters => 8,
+        }
+    }
+}
+
 /// 時計の周回を扱い、期限切れの入力・復元を再開させない。
 pub fn within_deadline(start: u32, now: u32) -> bool {
     now.wrapping_sub(start) <= DEADLINE_MS
@@ -49,7 +85,7 @@ pub trait Backend {
     fn read_open(&mut self) -> ImeReply;
     /// 開閉だけを設定する。
     fn set_open(&mut self, open: bool) -> ImeReply;
-    /// 最後にガードを確認し、待機を挟まず OK と Enter を一度だけ投入する。
+    /// 最後にガードを確認し、選択した固定列を待機なしで一括投入する。
     fn send_once(&mut self) -> InputReply;
     /// 入力後の復元だけの暫定待機。アプリの処理完了確認ではない。
     fn wait_before_restore(&mut self);
@@ -287,6 +323,26 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    /// 追加文字や解放漏れがなく、既存の6イベントを先頭に保つ。
+    #[test]
+    fn input_plans_keep_one_ok_and_bounded_enters() {
+        use InputKey::{Enter, Unicode};
+        let expected = [
+            (Unicode(79), false),
+            (Unicode(79), true),
+            (Unicode(75), false),
+            (Unicode(75), true),
+            (Enter, false),
+            (Enter, true),
+        ];
+        assert_eq!(InputPlan::SingleEnter.events(), expected);
+        let double = InputPlan::TwoEnters.events();
+        assert_eq!(&double[..6], expected);
+        assert_eq!(&double[6..], [(Enter, false), (Enter, true)]);
+        assert_eq!(InputPlan::SingleEnter.count(), 6);
+        assert_eq!(InputPlan::TwoEnters.count(), 8);
+    }
 
     struct Fake {
         replies: VecDeque<ImeReply>,
