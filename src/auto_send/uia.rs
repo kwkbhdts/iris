@@ -48,6 +48,7 @@ struct Outcome {
     verification_failed: bool,
     input: Option<model::InputReply>,
     manual: bool,
+    post: Option<crate::observation::Recorder>,
 }
 impl Default for Outcome {
     /// 未実施と未確認を成功から分離する。
@@ -63,6 +64,7 @@ impl Default for Outcome {
             verification_failed: false,
             input: None,
             manual: false,
+            post: None,
         }
     }
 }
@@ -165,6 +167,11 @@ impl Session {
                 outcome.interrupted = true;
             }
         }
+        if result.is_ok() && !app::STOP.load(Ordering::SeqCst) {
+            if let Some(mut post) = outcome.post.take() {
+                post.follow(&mut trace);
+            }
+        }
         trace.stage = "summary";
         let input = outcome.input.unwrap_or(model::InputReply {
             attempted: false,
@@ -189,7 +196,9 @@ impl Session {
 
     /// F1ごとに探索し直し、再検証後に一回だけフォーカスを要求する。
     fn perform(&self, request: Request, trace: &mut Trace, outcome: &mut Outcome) -> Result<()> {
-        if !crate::TARGET_SCOPE.allows(request.context.app) {
+        if !crate::TARGET_SCOPE.allows(request.context.app)
+            || !crate::selected_mode().allows(request.context.app)
+        {
             return Err("unsupported_app");
         }
         trace.stage = "search";
@@ -348,6 +357,13 @@ impl Session {
         guard(request, trace, outcome)?;
         let permitted = outcome.permitted;
         let saved_identity = inner.identity_snapshot();
+        let observe = crate::selected_mode() == crate::mode::Mode::ObserveIme;
+        let mut recorder = crate::observation::Recorder::new(
+            request,
+            permitted,
+            saved_identity,
+            inner.observation_epoch(),
+        );
         let quick = || app::check_send(request, permitted).is_ok();
         let result = {
             let mut validate = |stage| {
@@ -391,12 +407,42 @@ impl Session {
                 consumed: false,
                 evidence: model::guard::Evidence::UNKNOWN,
             };
-            let result = model::run(&mut backend);
+            let result = if crate::selected_mode() == crate::mode::Mode::NoImeChatGpt {
+                crate::comparison::no_ime(&mut backend)
+            } else if observe {
+                let mut sample = |phase, open| recorder.phase(phase, open);
+                let mut observed = crate::comparison::Observed {
+                    inner: backend,
+                    sample: &mut sample,
+                    failed: false,
+                };
+                let result = model::run(&mut observed);
+                if observed.failed {
+                    observed.inner.failed = true;
+                }
+                backend = observed.inner;
+                result
+            } else {
+                model::run(&mut backend)
+            };
             if backend.failed {
                 outcome.verification_failed = true;
             }
             result
         };
+        if observe {
+            recorder.flush(trace);
+            if result.status == "input_enqueued; legacy_restored; app_and_tsf_result_unknown"
+                && !outcome.verification_failed
+            {
+                outcome.post = Some(recorder);
+            } else {
+                trace.stage = "ime.observation_end";
+                trace.record(format_args!(
+                    "reason=no_confirmed_restore no_delayed_samples=true"
+                ));
+            }
+        }
         outcome.input = result.input;
         outcome.manual = result.manual;
         trace.stage = "input.result";

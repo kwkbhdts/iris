@@ -14,13 +14,25 @@ mod restore;
 #[path = "../auto_send/selection.rs"]
 mod selection;
 #[cfg(windows)]
-static INSPECT_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static MODE: std::sync::OnceLock<mode::Mode> = std::sync::OnceLock::new();
 
 /// 起動時だけ選んだ読み取りモードを、要求中には変更しない。
 #[cfg(windows)]
 fn inspect_only() -> bool {
-    *INSPECT_ONLY.get().expect("mode initialized before hooks")
+    selected_mode() == mode::Mode::Inspect
 }
+
+/// モードはフック開始前に一度だけ確定する。
+#[cfg(windows)]
+fn selected_mode() -> mode::Mode {
+    *MODE.get().expect("mode initialized before hooks")
+}
+#[cfg(any(windows, test))]
+#[path = "../auto_send/comparison.rs"]
+mod comparison;
+#[cfg(windows)]
+#[path = "../auto_send/observation.rs"]
+mod observation;
 
 #[cfg(any(windows, test))]
 #[path = "../auto_send/root_search.rs"]
@@ -100,17 +112,18 @@ fn main() {
     #[cfg(windows)]
     {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
-        let inspect = match mode::parse(&args) {
+        let mode = match mode::parse(&args) {
             Ok(value) => value,
             Err(()) => {
-                eprintln!("Usage: iris-auto-send-probe.exe [--inspect]");
+                eprintln!("Usage: iris-auto-send-probe.exe [--inspect | --observe-ime | --no-ime-chatgpt]");
                 std::process::exit(2);
             }
         };
-        INSPECT_ONLY.set(inspect).expect("mode initialized once");
+        MODE.set(mode).expect("mode initialized once");
         println!(
             "mode={} no_focus_text_enter_ime_writes={inspect}",
-            if inspect { "inspect" } else { "send" }
+            mode.label(),
+            inspect = mode == mode::Mode::Inspect
         );
         app::run();
     }

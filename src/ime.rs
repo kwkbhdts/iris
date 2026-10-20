@@ -224,6 +224,12 @@ pub struct ImeBackend {
 }
 
 impl ImeBackend {
+    /// 後追い観測にも準備時の履歴を渡す。世代を更新しない。
+    #[allow(dead_code)]
+    pub fn observation_epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// 失敗後の読取り診断へ、変更前の保存済み識別情報だけを渡す。
     #[allow(dead_code)]
     pub fn identity_snapshot(&self) -> (Snapshot, WindowId, usize) {
@@ -469,4 +475,26 @@ pub fn read_identity() -> (
         (value != 0).then_some(value)
     });
     (foreground, focus, ime, layout)
+}
+
+/// 保存IME窓のconversionを観測する。生の0も対応保証や英数確定にはしない。
+#[allow(dead_code)]
+pub fn read_conversion(window: WindowId) -> ImeReply {
+    query(window, 0x0001)
+}
+/// 保存IME窓のopenを後追いで読む。書込みや期限の変更は行わない。
+#[allow(dead_code)]
+pub fn read_saved_open(window: WindowId) -> ImeReply {
+    query(window, IMC_GETOPENSTATUS)
+}
+
+/// 書込み期限を更新せず、元の介入履歴と停止要求だけを読取り用に確認する。
+#[allow(dead_code)]
+pub fn observation_history_valid(epoch: u64) -> bool {
+    !ABORT.load(Ordering::SeqCst)
+        && !STOP.load(Ordering::SeqCst)
+        && INPUT_HISTORY
+            .check(epoch, EPOCH.load(Ordering::SeqCst), &EPOCH)
+            .permits()
+        && !other_iris_running()
 }

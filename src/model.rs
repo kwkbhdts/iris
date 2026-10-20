@@ -30,7 +30,17 @@ pub struct InputReply {
     pub inserted: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImePhase {
+    Start,
+    Off,
+    Restored,
+}
+
 pub trait Backend {
+    /// 比較版だけの読取り観測。通常版では追加操作をしない。
+    fn observe_phase(&mut self, _phase: ImePhase, _open: ImeReply) {}
+
     /// 対象・介入・期限・レイアウトを再確認する。
     fn guarded(&mut self) -> bool;
     /// 終了要求後には新たな入力を送らない。
@@ -128,6 +138,8 @@ impl Outcome {
             "restore_skipped; guard_failed_or_state_unknown" => "IRIS-I106",
             "restore_request_unconfirmed" => "IRIS-I107",
             "restore_readback_unconfirmed" => "IRIS-I108",
+            "input_enqueued; ime_untouched; app_and_tsf_result_unknown" => "IRIS-C000",
+            "comparison_no_input; ime_untouched" => "IRIS-C101",
             "skipped_before_change"
             | "input_skipped; original_off; unchanged"
             | "input_skipped; legacy_restored; actual_tsf_state_unknown"
@@ -163,6 +175,7 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
         return out;
     }
     let original = backend.read_open();
+    backend.observe_phase(ImePhase::Start, original);
     let was_on = match original {
         ImeReply::Raw(0) => false,
         ImeReply::Raw(1) => true,
@@ -184,6 +197,7 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
     }
 
     let off = backend.read_open();
+    backend.observe_phase(ImePhase::Off, off);
     if !matches!(off, ImeReply::Raw(0)) || !backend.guarded() {
         out.status = "off_not_confirmed_or_guard_failed; no_input";
         return out;
@@ -257,6 +271,7 @@ pub fn run(backend: &mut impl Backend) -> Outcome {
     }
     out.status = "restore_readback_unconfirmed";
     let after = backend.read_open();
+    backend.observe_phase(ImePhase::Restored, after);
     if matches!(after, ImeReply::Raw(1)) && backend.guarded() {
         out.manual = false;
         out.status = if sent {

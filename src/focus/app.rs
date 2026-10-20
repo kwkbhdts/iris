@@ -22,6 +22,10 @@ use windows_sys::Win32::{
 static EVENTS: Events = Events::EMPTY;
 pub static STOP: AtomicBool = AtomicBool::new(false);
 static BUSY: AtomicBool = AtomicBool::new(false);
+static POST_OBSERVING: AtomicBool = AtomicBool::new(false);
+static POST_STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+// 書込み側の総期限とは別の、後追い読取り専用期限。
+const POST_BUDGET_MS: u32 = 1200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Window {
@@ -120,6 +124,18 @@ pub fn check(request: Request) -> Result<(), CheckFailure> {
 /// オート送信は探索開始から同じ履歴を使い、検証済みの二通知だけを除外する。
 #[allow(dead_code)]
 pub fn check_send(request: Request, permitted: Option<[u64; 2]>) -> Result<(), &'static str> {
+    if POST_OBSERVING.load(Ordering::SeqCst) {
+        return Err("read_only_phase_no_writes");
+    }
+    check_send_context(request, permitted, true)
+}
+
+/// 原要求の履歴・前面・修飾キーを確認し、観測用の新世代を作らない。
+fn check_send_context(
+    request: Request,
+    permitted: Option<[u64; 2]>,
+    writing: bool,
+) -> Result<(), &'static str> {
     if STOP.load(Ordering::SeqCst) {
         return Err("stopped");
     }
@@ -129,7 +145,7 @@ pub fn check_send(request: Request, permitted: Option<[u64; 2]>) -> Result<(), &
     if foreground() != Some(request.window) {
         return Err("foreground_changed");
     }
-    if request.started.elapsed().as_millis() >= policy::BUDGET_MS {
+    if writing && request.started.elapsed().as_millis() >= policy::BUDGET_MS {
         return Err("deadline_exceeded");
     }
     if modifiers() {
@@ -139,6 +155,34 @@ pub fn check_send(request: Request, permitted: Option<[u64; 2]>) -> Result<(), &
         return Err("input_or_unknown_history");
     }
     Ok(())
+}
+
+/// 書込み処理終了後だけ読取り専用へ遷移する。元要求の期限や履歴は更新しない。
+#[allow(dead_code)]
+pub fn begin_post_observation(
+    request: Request,
+    permitted: Option<[u64; 2]>,
+) -> Result<(), &'static str> {
+    check_send(request, permitted)?;
+    POST_STARTED.store(unsafe { GetTickCount() }, Ordering::SeqCst);
+    POST_OBSERVING.store(true, Ordering::SeqCst);
+    check_post_observation(request, permitted)
+}
+
+/// 読取り専用段階でも元履歴を保ち、独立した上限内だけ観測する。
+#[allow(dead_code)]
+pub fn check_post_observation(
+    request: Request,
+    permitted: Option<[u64; 2]>,
+) -> Result<(), &'static str> {
+    if !POST_OBSERVING.load(Ordering::SeqCst) {
+        return Err("not_read_only_phase");
+    }
+    if unsafe { GetTickCount() }.wrapping_sub(POST_STARTED.load(Ordering::SeqCst)) > POST_BUDGET_MS
+    {
+        return Err("observation_deadline");
+    }
+    check_send_context(request, permitted, false)
 }
 
 /// 原要求を変更せず、観測開始候補の世代と既知の履歴を返す。
@@ -232,9 +276,14 @@ fn refresh() {
         };
         state.target = target;
 
-        let expired = state
-            .active
-            .is_some_and(|request| request.started.elapsed().as_millis() >= policy::BUDGET_MS);
+        let expired = if POST_OBSERVING.load(Ordering::SeqCst) {
+            unsafe { GetTickCount() }.wrapping_sub(POST_STARTED.load(Ordering::SeqCst))
+                > POST_BUDGET_MS
+        } else {
+            state
+                .active
+                .is_some_and(|request| request.started.elapsed().as_millis() >= policy::BUDGET_MS)
+        };
         if BUSY.load(Ordering::SeqCst) && !state.timed_out && expired {
             state.timed_out = true;
             STOP.store(true, Ordering::SeqCst);
@@ -386,6 +435,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             let epoch =
                 EVENTS.record(|| observe(Kind::NewShortcut, Truth::False, key.time, received));
             if !BUSY.swap(true, Ordering::SeqCst) {
+                // 前要求の読取り段階は、新要求を受理するUIスレッドだけで解除する。
+                POST_OBSERVING.store(false, Ordering::SeqCst);
                 let (window, app) = target.unwrap();
                 let started = received;
                 let context = Context {
@@ -425,7 +476,7 @@ fn worker(receiver: mpsc::Receiver<Request>) {
             if crate::TARGET_SCOPE == crate::diagnostic::TargetScope::CandidateCount {
                 println!("req=0 key=- app=- stage=ready ms=0 F1=count_candidates targets=ChatGPT.exe,Claude.exe,firefox.exe,chrome.exe no_focus_text_enter_ime_writes=true");
             } else if crate::AUTO_SEND {
-                println!("req=0 key=- app=- stage=ready ms=0 F1=run_selected_mode targets=ChatGPT.exe,Claude.exe,firefox.exe,chrome.exe default_mode=send inspect_flag=--inspect empty_input_and_no_composition_required=true");
+                println!("req=0 key=- app=- stage=ready ms=0 F1=run_selected_mode targets=ChatGPT.exe,Claude.exe,firefox.exe,chrome.exe default_mode=send inspect_flag=--inspect comparison_flags=--observe-ime,--no-ime-chatgpt empty_input_and_no_composition_required=true");
             } else if crate::AUTO_FOCUS {
                 println!("req=0 key=- app=- stage=ready ms=0 F1=auto_focus ChatGPT_only=true no_text_enter_ime_writes=true");
             } else if crate::PATH_ONLY {
@@ -456,7 +507,7 @@ pub fn run() {
     if crate::TARGET_SCOPE == crate::diagnostic::TargetScope::CandidateCount {
         println!("req=0 key=- app=- stage=start ms=0 build=candidate-count-readonly-v2 stop_other_iris_first=true console_Enter=exit no_focus_text_enter_ime_writes=true");
     } else if crate::AUTO_SEND {
-        println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v7 default_mode=send inspect_flag=--inspect candidate_rules=basic5_browser_document semantic_identity_proven=false stop_normal_iris_first=true console_Enter=exit");
+        println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v8 default_mode=send inspect_flag=--inspect comparison_flags=--observe-ime,--no-ime-chatgpt candidate_rules=basic5_browser_document semantic_identity_proven=false stop_normal_iris_first=true console_Enter=exit");
     } else if crate::AUTO_FOCUS {
         println!("req=0 key=- app=- stage=start ms=0 build=auto-focus-v3 provisional_dots_rule=true stop_normal_iris_first=true no_uncommitted_ime_text=true console_Enter=exit");
     } else if crate::PATH_ONLY {
