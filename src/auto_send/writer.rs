@@ -488,7 +488,7 @@ mod regression {
     #[test]
     fn scroll_requires_a_still_valid_target_before_input() {
         for wheel in [Kind::MouseWheel, Kind::MouseHorizontalWheel] {
-            for changed in 0..=6 {
+            for changed in 0..=7 {
                 let events = Events::EMPTY;
                 let start = record(&events, Kind::NewShortcut, Truth::False);
                 let focus = Cell::new(true);
@@ -533,11 +533,11 @@ mod regression {
             }
         }
     }
-    /// 送信後のスクロールでUIA対象が変わる場合、IMEオン復元を行わない。
+    /// 復元は元要素の同一性で判断し、新規送信の属性や件数だけでは拒否しない。
     #[test]
-    fn scroll_target_changes_are_rechecked_before_ime_restore() {
+    fn restore_uses_saved_target_after_input() {
         for wheel in [Kind::MouseWheel, Kind::MouseHorizontalWheel] {
-            for changed in 1..=6 {
+            for changed in 0..=11 {
                 let events = Events::EMPTY;
                 let start = record(&events, Kind::NewShortcut, Truth::False);
                 let focus = Cell::new(true);
@@ -549,12 +549,12 @@ mod regression {
                         return true;
                     }
                     record(&events, wheel, Truth::False);
-                    crate::selection::tests::revalidate_case(changed)
+                    crate::restore::tests::validate_case(changed)
                 };
                 let inner = Script {
                     events: &events,
-                    reads: [1, 0].map(ImeReply::Raw).into(),
-                    writes: [0].map(ImeReply::Raw).into(),
+                    reads: [1, 0, 0, 1].map(ImeReply::Raw).into(),
+                    writes: [0, 0].map(ImeReply::Raw).into(),
                     calls: vec![],
                     after: Some((wheel, Truth::False)),
                     focus: &focus,
@@ -570,9 +570,15 @@ mod regression {
                     evidence: Evidence::UNKNOWN,
                 };
                 let result = model::run(&mut writer);
-                assert!(result.manual);
-                assert_eq!(writer.inner.calls, ["off", "input"]);
-                assert_eq!(result.diagnostic(), "IRIS-I106");
+                if matches!(changed, 0 | 3 | 4 | 7) {
+                    assert!(!result.manual);
+                    assert_eq!(writer.inner.calls, ["off", "input", "on"]);
+                    assert_eq!(result.diagnostic(), "IRIS-I000");
+                } else {
+                    assert!(result.manual);
+                    assert_eq!(writer.inner.calls, ["off", "input"]);
+                    assert_eq!(result.diagnostic(), "IRIS-I106");
+                }
                 assert!(!writer.send_once().attempted);
                 assert_eq!(stages, [ValidationStage::Send, ValidationStage::Restore]);
             }

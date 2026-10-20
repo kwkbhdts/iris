@@ -260,7 +260,7 @@ pub(crate) mod tests {
         if changed == 1 {
             p.items[0].0 = 99;
         }
-        if !crate::policy::editable(true, changed != 3, true, changed == 2, false) {
+        if !crate::policy::editable(true, changed != 3, changed != 7, changed == 2, false) {
             p.error_at = Some((0, "candidate_attributes_changed"));
         }
         if changed == 6 {

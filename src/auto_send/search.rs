@@ -65,32 +65,8 @@ impl selection::Probe for Candidates<'_> {
 
     /// 診断と同じ有界祖先探索を使い、unknownをfalseに変えない。
     fn ancestry(&mut self, element: &Self::Element) -> Result<bool> {
-        let observed = ancestry::inspect(
-            &mut Ancestors {
-                session: self.session,
-                root: self.root,
-                request: self.request,
-                trace: self.trace,
-                outcome: self.outcome,
-            },
-            element.clone(),
-        );
-        self.trace.record(format_args!(
-            "root_reached={} ancestry_complete={} has_document_ancestor={} reason={}",
-            observed.root_reached,
-            observed.complete,
-            match observed.document {
-                Some(_) if !selection::requires_document(self.request.context.app) => "not_checked",
-                Some(true) => "true",
-                Some(false) => "false",
-                None => "unknown",
-            },
-            observed.reason
-        ));
-        if !observed.complete || !observed.root_reached {
-            return Err(observed.reason);
-        }
-        observed.document.ok_or("ancestry_unknown")
+        self.session
+            .ancestor_document(element, self.root, self.request, self.trace, self.outcome)
     }
 
     /// 再探索で元の候補と同じ要素であることを確認する。
@@ -178,6 +154,43 @@ impl Tree for Ancestors<'_> {
 }
 
 impl Session {
+    /// 保存済み要素の祖先を、送信選択と復元検証で同じ条件で確認する。
+    pub(super) fn ancestor_document(
+        &self,
+        element: &IUIAutomationElement,
+        root: &IUIAutomationElement,
+        request: Request,
+        trace: &mut Trace,
+        outcome: &mut Outcome,
+    ) -> Result<bool> {
+        let observed = ancestry::inspect(
+            &mut Ancestors {
+                session: self,
+                root,
+                request,
+                trace,
+                outcome,
+            },
+            element.clone(),
+        );
+        trace.record(format_args!(
+            "root_reached={} ancestry_complete={} has_document_ancestor={} reason={}",
+            observed.root_reached,
+            observed.complete,
+            match observed.document {
+                Some(_) if !selection::requires_document(request.context.app) => "not_checked",
+                Some(true) => "true",
+                Some(false) => "false",
+                None => "unknown",
+            },
+            observed.reason
+        ));
+        if !observed.complete || !observed.root_reached {
+            return Err(observed.reason);
+        }
+        observed.document.ok_or("ancestry_unknown")
+    }
+
     /// 現在の5属性だけを確認し、内容・Class・Control Viewは取得しない。
     pub(super) fn editor(
         &self,

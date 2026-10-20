@@ -354,7 +354,15 @@ impl Session {
                     writer::ValidationStage::Send => "pre_input.verify",
                     writer::ValidationStage::Restore => "pre_restore.verify",
                 };
-                match self.validate_send(&target, &root, request, trace, outcome) {
+                let validation = match stage {
+                    writer::ValidationStage::Send => {
+                        self.validate_send(&target, &root, request, trace, outcome)
+                    }
+                    writer::ValidationStage::Restore => {
+                        self.validate_restore(&target, &root, request, trace, outcome)
+                    }
+                };
+                match validation {
                     Ok(()) => true,
                     Err(reason) => {
                         trace.record(format_args!(
@@ -441,3 +449,6 @@ mod search;
 
 #[path = "scope_uia.rs"]
 mod scope_uia;
+
+#[path = "restore_uia.rs"]
+mod restore_uia;
