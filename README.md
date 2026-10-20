@@ -116,4 +116,6 @@ UIAがダイアログ属性を公開しない検索パネル等は、この拒�
 
 [読み取り専用候補数診断](CANDIDATE_PROBE.md) の `iris-candidate-probe.exe` は、ChatGPT・Claude・Firefox・Chromeの前面ルート配下でEdit・画面内・有効・フォーカス可能・非passwordの5条件だけを数えます。Class、Document、IsControlElement、初期フォーカスで絞らず、アドレスバーも除外しません。0件・1件・複数・未完了と、公開ダイアログ/modalによる対象不可を区別します。
 
+追加の祖先診断では各候補のDocument祖先有無・前面ルート到達・完了状態を記録します。Documentなしを除外せず、元の件数と対象可否を維持します。未完了はunknownです。
+
 送信・フォーカス移動・IME書込みは一切なく、既存オート版の対象拡大もしていません。候補1件は会話欄や空欄の証明ではありません。UIA未公開の要素・オーバーレイは検出できない限界があります。Windows実機は未検証です。公開承認後のCIでは別artifact `iris-candidate-probe-windows-x64` を使用します。

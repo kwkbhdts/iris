@@ -454,7 +454,7 @@ pub fn run() {
     println!("Iris build: {}", crate::build_info::ID);
     diagnostic::initialize_clock();
     if crate::TARGET_SCOPE == crate::diagnostic::TargetScope::CandidateCount {
-        println!("req=0 key=- app=- stage=start ms=0 build=candidate-count-readonly-v1 stop_other_iris_first=true console_Enter=exit no_focus_text_enter_ime_writes=true");
+        println!("req=0 key=- app=- stage=start ms=0 build=candidate-count-readonly-v2 stop_other_iris_first=true console_Enter=exit no_focus_text_enter_ime_writes=true");
     } else if crate::AUTO_SEND {
         println!("req=0 key=- app=- stage=start ms=0 build=auto-send-v3 default_mode=send inspect_flag=--inspect provisional_app_rules=true stop_normal_iris_first=true console_Enter=exit");
     } else if crate::AUTO_FOCUS {

@@ -1,10 +1,12 @@
 use crate::{
+    ancestry::{self, Observation, Tree},
     app::{self, Request},
     diagnostic::Trace,
     policy,
     report::Report,
 };
 use std::sync::atomic::Ordering;
+use windows::core::Interface;
 use windows::Win32::{
     Foundation::HWND,
     System::{Com::*, Variant::VARIANT},
@@ -124,10 +126,29 @@ impl Session {
             report.complete = false;
             app::STOP.store(true, Ordering::SeqCst);
         }
+        let mut details = match result.as_ref() {
+            Ok((root, list)) if report.complete => self.details(
+                root,
+                list,
+                report.candidates.unwrap_or(0),
+                request,
+                &mut trace,
+            ),
+            _ => Err("base_incomplete"),
+        };
+        if request.started.elapsed().as_millis() >= policy::BUDGET_MS {
+            app::STOP.store(true, Ordering::SeqCst);
+            details = Err("deadline_exceeded");
+        }
         trace.stage = "summary";
+        trace.record(format_args!(
+            "details_complete={} details_reason={}",
+            details.is_ok(),
+            details.err().unwrap_or("none")
+        ));
         trace.record(format_args!("complete={} candidate_count={:?} candidate_state={} visible_dialog_or_modal_max={:?} target_eligible={} reason={} unreported_overlay_state=unknown no_focus_text_enter_ime_writes=true", report.complete, report.candidates, report.state(), report.blockers, report.eligible(), result.err().unwrap_or(if report.complete { "none" } else { "deadline" })));
         trace.finish(
-            if report.complete {
+            if report.complete && details.is_ok() {
                 "OBSERVED"
             } else {
                 "INCOMPLETE"
@@ -156,7 +177,12 @@ impl Session {
     }
 
     /// 初期フォーカスによらず、前面の最上位ルート配下を全件数える。
-    fn inspect(&self, request: Request, trace: &mut Trace, report: &mut Report) -> Result<()> {
+    fn inspect(
+        &self,
+        request: Request,
+        trace: &mut Trace,
+        report: &mut Report,
+    ) -> Result<(IUIAutomationElement, IUIAutomationElementArray)> {
         if !crate::TARGET_SCOPE.allows(request.context.app) {
             return Err("unsupported_app");
         }
@@ -212,6 +238,133 @@ impl Session {
         {
             return Err("root_changed");
         }
-        guard(request, trace)
+        guard(request, trace)?;
+        Ok((root, list))
+    }
+
+    /// 件数判定を変更せず、各候補の祖先だけを追加観測する。
+    fn details(
+        &self,
+        root: &IUIAutomationElement,
+        list: &IUIAutomationElementArray,
+        count: i32,
+        request: Request,
+        trace: &mut Trace,
+    ) -> Result<()> {
+        trace.stage = "ancestry";
+        let walker = read!(
+            trace,
+            request,
+            "RawViewWalker",
+            self.automation.RawViewWalker()
+        )?;
+        let mut failure = None;
+        for index in 0..count.min(ancestry::MAX_CANDIDATES) {
+            let observation = match read!(
+                trace,
+                request,
+                "GetElement(candidate)",
+                list.GetElement(index)
+            ) {
+                Ok(candidate) => ancestry::inspect(
+                    &mut Ancestors {
+                        session: self,
+                        root,
+                        walker: &walker,
+                        request,
+                        trace,
+                    },
+                    candidate,
+                ),
+                Err(reason) => Observation::unknown(reason),
+            };
+            trace.record(format_args!("candidate_index={} root_reached={} ancestry_complete={} has_document_ancestor={} reason={}", index, observation.root_reached, observation.complete, match observation.document { Some(true) => "true", Some(false) => "false", None => "unknown" }, observation.reason));
+            if !observation.complete {
+                failure.get_or_insert(observation.reason);
+            }
+            guard(request, trace)?;
+        }
+        if count > ancestry::MAX_CANDIDATES {
+            trace.record(format_args!(
+                "candidate_details_omitted={}",
+                count - ancestry::MAX_CANDIDATES
+            ));
+            failure.get_or_insert("candidate_details_limit");
+        }
+        let current = read!(
+            trace,
+            request,
+            "ElementFromHandle(details_final)",
+            self.automation
+                .ElementFromHandle(HWND(request.window.hwnd as *mut _))
+        )?;
+        if !read!(
+            trace,
+            request,
+            "CompareElements(details_root)",
+            self.automation.CompareElements(root, &current)
+        )?
+        .as_bool()
+        {
+            return Err("root_changed");
+        }
+        guard(request, trace)?;
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+struct Ancestors<'a> {
+    session: &'a Session,
+    root: &'a IUIAutomationElement,
+    walker: &'a IUIAutomationTreeWalker,
+    request: Request,
+    trace: &'a mut Trace,
+}
+
+impl Tree for Ancestors<'_> {
+    type Node = IUIAutomationElement;
+
+    /// 各読み取りの前後で要求の有効性を確認する。
+    fn check(&mut self) -> Result<()> {
+        guard(self.request, self.trace)
+    }
+
+    /// 保存した前面ルートとのUIA同一性だけを比較する。
+    fn is_root(&mut self, node: &Self::Node) -> Result<bool> {
+        read!(
+            self.trace,
+            self.request,
+            "CompareElements(ancestor_root)",
+            self.session.automation.CompareElements(node, self.root)
+        )
+        .map(|v| v.as_bool())
+    }
+
+    /// 内容属性は読まず、コントロール種別だけを確認する。
+    fn is_document(&mut self, node: &Self::Node) -> Result<bool> {
+        read!(
+            self.trace,
+            self.request,
+            "CurrentControlType(ancestor)",
+            node.CurrentControlType()
+        )
+        .map(|v| v == UIA_DocumentControlTypeId)
+    }
+
+    /// S_OKの親なしとAPI失敗を分け、参照は要求内だけで保持する。
+    fn parent(&mut self, node: &Self::Node) -> Result<Option<Self::Node>> {
+        guard(self.request, self.trace)?;
+        let mut raw = std::ptr::null_mut();
+        let hr = unsafe {
+            (self.walker.vtable().GetParentElement)(self.walker.as_raw(), node.as_raw(), &mut raw)
+        };
+        let parent = if raw.is_null() {
+            None
+        } else {
+            Some(unsafe { IUIAutomationElement::from_raw(raw) })
+        };
+        api(self.trace, "GetParentElement", hr.ok())?;
+        guard(self.request, self.trace)?;
+        Ok(parent)
     }
 }
