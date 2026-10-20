@@ -73,25 +73,8 @@ impl Session {
             automation
                 .SetTransactionTimeout(200)
                 .map_err(|_| "uia_timeout")?;
-            let mut candidate_condition = automation
-                .CreatePropertyCondition(
-                    UIA_ControlTypePropertyId,
-                    &VARIANT::from(UIA_EditControlTypeId.0),
-                )
-                .map_err(|_| "condition_init")?;
-            for (property, value) in [
-                (UIA_IsOffscreenPropertyId, false),
-                (UIA_IsEnabledPropertyId, true),
-                (UIA_IsKeyboardFocusablePropertyId, true),
-                (UIA_IsPasswordPropertyId, false),
-            ] {
-                let part = automation
-                    .CreatePropertyCondition(property, &VARIANT::from(value))
-                    .map_err(|_| "condition_init")?;
-                candidate_condition = automation
-                    .CreateAndCondition(&candidate_condition, &part)
-                    .map_err(|_| "condition_init")?;
-            }
+            let candidate_condition =
+                crate::candidate_condition::create(&automation).map_err(|_| "condition_init")?;
             let dialog = automation
                 .CreatePropertyCondition(UIA_IsDialogPropertyId, &VARIANT::from(true))
                 .map_err(|_| "condition_init")?;

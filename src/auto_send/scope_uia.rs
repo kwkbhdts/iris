@@ -7,6 +7,7 @@ struct Search<'a> {
     request: Request,
     trace: &'a mut Trace,
     outcome: &'a mut Outcome,
+    expected: Option<&'a Target>,
 }
 impl Probe for Search<'_> {
     type Target = Target;
@@ -17,10 +18,22 @@ impl Probe for Search<'_> {
             .unblocked(self.root, self.request, self.trace, self.outcome)
     }
 
-    /// 候補自身のDocument・祖先順序・ルート所属を既存検索で確認する。
+    /// 選択と再検証を同じ全候補探索へ接続する。
     fn find_target(&mut self) -> Result<Target> {
-        self.session
-            .search(self.root, self.request, self.trace, self.outcome)
+        let mut probe = search::Candidates {
+            session: self.session,
+            root: self.root,
+            request: self.request,
+            trace: self.trace,
+            outcome: self.outcome,
+            list: None,
+        };
+        let document = selection::requires_document(self.request.context.app);
+        let element = match self.expected {
+            Some(target) => selection::revalidate(&mut probe, document, &target.element)?,
+            None => selection::select(&mut probe, document)?,
+        };
+        Ok(Target { element })
     }
 }
 
@@ -42,7 +55,28 @@ impl Session {
             request,
             trace,
             outcome,
+            expected: None,
         })
+    }
+
+    /// 前後のルート検証を保ち、再探索の唯一候補を元の要素と比較する。
+    pub(super) fn recheck_root(
+        &self,
+        root: &IUIAutomationElement,
+        target: &Target,
+        request: Request,
+        trace: &mut Trace,
+        outcome: &mut Outcome,
+    ) -> Result<()> {
+        root_search::run(&mut Search {
+            session: self,
+            root,
+            request,
+            trace,
+            outcome,
+            expected: Some(target),
+        })
+        .map(|_| ())
     }
 
     /// 明示された画面内ダイアログは、候補の兄弟領域でも拒否する。

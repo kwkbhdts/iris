@@ -1,7 +1,8 @@
 use crate::{
+    ancestry,
     app::{self, Request},
     diagnostic::Trace,
-    ime, model, policy, rules, transition, types, writer,
+    ime, model, policy, selection, transition, types, writer,
 };
 use std::{
     sync::atomic::Ordering,
@@ -35,7 +36,6 @@ pub struct Session {
 }
 struct Target {
     element: IUIAutomationElement,
-    regions: Vec<IUIAutomationElement>,
 }
 struct Outcome {
     search: &'static str,
@@ -107,7 +107,7 @@ macro_rules! call {
 }
 
 impl Session {
-    /// 固定のControl View Edit条件を専用MTA内で用意する。
+    /// 診断と同じ5条件を専用MTA内で用意する。
     pub fn new() -> Result<Self> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
@@ -123,26 +123,8 @@ impl Session {
             automation
                 .SetTransactionTimeout(200)
                 .map_err(|_| "uia_timeout")?;
-            let mut condition = automation
-                .ControlViewCondition()
-                .map_err(|_| "condition_init")?;
-            for (property, value) in [
-                (
-                    UIA_ControlTypePropertyId,
-                    VARIANT::from(UIA_EditControlTypeId.0),
-                ),
-                (UIA_IsEnabledPropertyId, VARIANT::from(true)),
-                (UIA_IsKeyboardFocusablePropertyId, VARIANT::from(true)),
-                (UIA_IsOffscreenPropertyId, VARIANT::from(false)),
-                (UIA_IsPasswordPropertyId, VARIANT::from(false)),
-            ] {
-                let part = automation
-                    .CreatePropertyCondition(property, &value)
-                    .map_err(|_| "condition_init")?;
-                condition = automation
-                    .CreateAndCondition(&condition, &part)
-                    .map_err(|_| "condition_init")?;
-            }
+            let condition =
+                crate::candidate_condition::create(&automation).map_err(|_| "condition_init")?;
             // 既知の文字列ではなく、UIAが明示するダイアログ／モーダル状態を使う。
             let dialog = automation
                 .CreatePropertyCondition(UIA_IsDialogPropertyId, &VARIANT::from(true))
@@ -242,26 +224,8 @@ impl Session {
             }
         };
         trace.stage = "revalidate";
-        // 再検索も同じ総期限内。追加候補と領域差し替えを直前に検出する。
-        let checked = self.search_root(&root, request, trace, outcome)?;
-        if target.regions.len() != checked.regions.len() {
-            return Err("region_count_changed");
-        }
-        for (before, after) in std::iter::once((&target.element, &checked.element))
-            .chain(target.regions.iter().zip(&checked.regions))
-        {
-            if !call!(
-                trace,
-                request,
-                outcome,
-                "CompareElements(revalidate)",
-                self.automation.CompareElements(before, after)
-            )?
-            .as_bool()
-            {
-                return Err("target_or_region_changed");
-            }
-        }
+        // 同じ総期限内で再探索し、別の唯一候補へ切り替わっていないか確認する。
+        self.recheck_root(&root, &target, request, trace, outcome)?;
         let actual = call!(
             trace,
             request,
@@ -288,7 +252,7 @@ impl Session {
         // 同じ検索・再検証を読み取りだけで試し、書込み経路へ到達させない。
         if crate::inspect_only() {
             guard(request, trace, outcome)?;
-            trace.record(format_args!("inspect_only=true provisional_rule_match=true semantic_identity_proven=false no_focus_text_enter_ime_writes=true"));
+            trace.record(format_args!("inspect_only=true candidate_match=true semantic_identity_proven=false no_focus_text_enter_ime_writes=true"));
             return Ok(());
         }
         trace.stage = "focus.set";
@@ -448,7 +412,7 @@ impl Session {
         Ok(())
     }
 
-    /// 送信前に候補一意性・領域同一性・実フォーカスを再確認する。
+    /// 送信前に候補一意性・要素同一性・実フォーカスを再確認する。
     fn validate_send(
         &self,
         target: &Target,
@@ -457,26 +421,7 @@ impl Session {
         trace: &mut Trace,
         outcome: &mut Outcome,
     ) -> Result<()> {
-        let checked = self.search_root(root, request, trace, outcome)?;
-        if target.regions.len() != checked.regions.len() {
-            return Err("region_count_changed");
-        }
-        for (before, after) in std::iter::once((&target.element, &checked.element))
-            .chain(target.regions.iter().zip(&checked.regions))
-        {
-            if !call!(
-                trace,
-                request,
-                outcome,
-                "CompareElements(send_target)",
-                self.automation.CompareElements(before, after)
-            )?
-            .as_bool()
-            {
-                outcome.verification_failed = true;
-                return Err("send_target_or_region_changed");
-            }
-        }
+        self.recheck_root(root, target, request, trace, outcome)?;
         // 検索後のスクロールでも、直前の可視性・有効性を取り直す。
         if !self.editor(&target.element, request, trace, outcome)? {
             outcome.verification_failed = true;
@@ -491,7 +436,7 @@ impl Session {
     }
 }
 
-#[path = "../auto_focus/search.rs"]
+#[path = "search.rs"]
 mod search;
 
 #[path = "scope_uia.rs"]

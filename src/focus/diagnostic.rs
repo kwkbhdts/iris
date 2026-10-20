@@ -73,7 +73,7 @@ impl TargetScope {
             Self::ReadOnlyDiscovery => matches!(app, App::ChatGpt | App::Claude),
             Self::ChatGptOnly => app == App::ChatGpt,
             Self::ClaudePath => app == App::Claude,
-            Self::AutoSend => matches!(app, App::ChatGpt | App::Claude),
+            Self::AutoSend => true,
         }
     }
 }
@@ -210,10 +210,7 @@ mod tests {
             );
             assert_eq!(TargetScope::ChatGptOnly.allows(app), app == App::ChatGpt);
             assert_eq!(TargetScope::ClaudePath.allows(app), app == App::Claude);
-            assert_eq!(
-                TargetScope::AutoSend.allows(app),
-                matches!(app, App::ChatGpt | App::Claude)
-            );
+            assert!(TargetScope::AutoSend.allows(app));
         }
     }
 

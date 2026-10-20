@@ -488,7 +488,7 @@ mod regression {
     #[test]
     fn scroll_requires_a_still_valid_target_before_input() {
         for wheel in [Kind::MouseWheel, Kind::MouseHorizontalWheel] {
-            for changed in 0..=5 {
+            for changed in 0..=6 {
                 let events = Events::EMPTY;
                 let start = record(&events, Kind::NewShortcut, Truth::False);
                 let focus = Cell::new(true);
@@ -496,15 +496,7 @@ mod regression {
                 // UIA応答を模擬し、実際の属性・候補数の判定関数を通す。
                 let mut validate = |_| {
                     record(&events, wheel, Truth::False);
-                    let same_target = changed != 1;
-                    let offscreen = changed == 2;
-                    let enabled = changed != 3;
-                    let candidates = if changed == 4 { 2 } else { 1 };
-                    let same_focus = changed != 5;
-                    same_target
-                        && crate::policy::editable(true, enabled, true, offscreen, false)
-                        && crate::rules::unique(true, candidates)
-                        && same_focus
+                    crate::selection::tests::revalidate_case(changed)
                 };
                 let inner = Script {
                     events: &events,
@@ -545,7 +537,7 @@ mod regression {
     #[test]
     fn scroll_target_changes_are_rechecked_before_ime_restore() {
         for wheel in [Kind::MouseWheel, Kind::MouseHorizontalWheel] {
-            for changed in 1..=5 {
+            for changed in 1..=6 {
                 let events = Events::EMPTY;
                 let start = record(&events, Kind::NewShortcut, Truth::False);
                 let focus = Cell::new(true);
@@ -557,10 +549,7 @@ mod regression {
                         return true;
                     }
                     record(&events, wheel, Truth::False);
-                    changed != 1
-                        && crate::policy::editable(true, changed != 3, true, changed == 2, false)
-                        && crate::rules::unique(true, if changed == 4 { 2 } else { 1 })
-                        && changed != 5
+                    crate::selection::tests::revalidate_case(changed)
                 };
                 let inner = Script {
                     events: &events,

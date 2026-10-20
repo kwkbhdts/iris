@@ -1,3 +1,12 @@
+#[cfg(any(windows, test))]
+#[path = "../candidate_probe/ancestry.rs"]
+mod ancestry;
+#[cfg(windows)]
+#[path = "../candidates/condition.rs"]
+mod candidate_condition;
+#[cfg(any(windows, test))]
+#[path = "../auto_send/selection.rs"]
+mod selection;
 #[cfg(windows)]
 static INSPECT_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -66,10 +75,6 @@ mod model;
 #[path = "../focus/policy.rs"]
 #[allow(dead_code)]
 mod policy;
-#[cfg(any(windows, test))]
-#[path = "../auto_focus/rules.rs"]
-#[cfg_attr(not(windows), allow(dead_code))]
-mod rules;
 #[cfg(any(windows, test))]
 #[path = "../auto_send/transition.rs"]
 mod transition;

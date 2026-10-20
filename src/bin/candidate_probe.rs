@@ -2,6 +2,9 @@
 #[path = "../candidate_probe/ancestry.rs"]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod ancestry;
+#[cfg(windows)]
+#[path = "../candidates/condition.rs"]
+mod candidate_condition;
 #[cfg(any(windows, test))]
 const TARGET_SCOPE: diagnostic::TargetScope = diagnostic::TargetScope::CandidateCount;
 
