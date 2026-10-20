@@ -1,184 +1,252 @@
 pub type Result<T> = std::result::Result<T, &'static str>;
 
-/// 復元対象の属性。新規送信用のEnabled・Focusableは含めない。
-#[derive(Clone, Copy)]
-pub struct Attributes {
-    pub edit: bool,
-    pub password: bool,
-    pub offscreen: bool,
+/// 保存したWin32/IME操作先が全項目既知かつ一致するときだけ復元を許可する。
+pub fn check_identity(values: [Option<bool>; 5]) -> Result<()> {
+    for (value, reason) in values.into_iter().zip([
+        "restore_foreground_changed",
+        "restore_win32_focus_changed",
+        "restore_ime_window_changed",
+        "restore_ime_owner_changed",
+        "restore_layout_changed",
+    ]) {
+        match value {
+            Some(true) => {}
+            Some(false) => return Err(reason),
+            None => return Err("restore_identity_unknown"),
+        }
+    }
+    Ok(())
 }
 
 pub trait Probe {
-    /// 固定履歴・前面・期限を確認する。
+    type Focus;
+    /// 元要求の固定履歴・前面・期限を確認する。
     fn check(&mut self) -> Result<()>;
-    /// 保存したルートの同一性と公開阻害要素を確認する。
+    /// 保存ルートの同一性と公開阻害要素を確認する。
     fn root(&mut self) -> Result<()>;
-    /// 元要素のルート到達と、必要なDocument所属を確認する。
-    fn ancestry(&mut self) -> Result<()>;
-    /// 保存した元要素の属性だけを読む。
-    fn attributes(&mut self) -> Result<Attributes>;
-    /// 実フォーカスを元要素と比較する。別候補へ切り替えない。
-    fn focused(&mut self) -> Result<bool>;
+    /// 保存したWin32入力先・IME操作先・layoutとの一致を確認する。
+    fn identity(&mut self) -> Result<()>;
+    /// 現在フォーカスを取得する。送信候補の選択ではない。
+    fn focus(&mut self) -> Result<Self::Focus>;
+    /// 現在フォーカスが保存ルート配下か確認する。
+    fn ancestry(&mut self, focus: &Self::Focus) -> Result<()>;
+    /// 復元検証の途中で現在フォーカスが変わっていないか確認する。
+    fn same_focus(&mut self, focus: &Self::Focus) -> Result<bool>;
 }
 
-/// 元要素の入力先同一性を確認し、候補の再選択は行わない。
+/// 旧UIA要素に依存せず、保存IME操作先の後処理として復元を検証する。
 pub fn validate<P: Probe>(probe: &mut P) -> Result<()> {
     probe.check()?;
     probe.root()?;
+    probe.identity()?;
     probe.check()?;
-    probe.ancestry()?;
+    let focus = probe.focus()?;
     probe.check()?;
-    let attrs = probe.attributes()?;
-    if !attrs.edit || attrs.password || attrs.offscreen {
-        return Err("restore_target_attributes_changed");
-    }
-    probe.check()?;
-    if !probe.focused()? {
-        return Err("restore_focus_changed");
-    }
+    probe.ancestry(&focus)?;
     probe.check()?;
     probe.root()?;
-    if !probe.focused()? {
-        return Err("restore_focus_changed");
+    if !probe.same_focus(&focus)? {
+        return Err("restore_focus_changed_during_check");
     }
+    probe.identity()?;
     probe.check()
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    pub struct Fake {
-        pub attrs: Attributes,
-        pub root_error: bool,
-        pub ancestor_error: bool,
-        pub read_error: bool,
-        pub focus: bool,
-        pub checks: usize,
-        pub interrupt_at: Option<usize>,
-        pub roots: usize,
-        pub change_root_at: Option<usize>,
-        pub focuses: usize,
-        pub change_focus_at: Option<usize>,
+    #[derive(Clone, Copy, Debug)]
+    pub enum Case {
+        Unchanged,
+        ReplacedUia,
+        RootChanged,
+        AncestryUnknown,
+        FocusReadFailed,
+        CompareFailed,
+        FocusChanged,
+        ForegroundChanged,
+        Win32FocusChanged,
+        ImeWindowChanged,
+        ImeOwnerChanged,
+        LayoutChanged,
+        IdentityUnknown,
+        Intervention,
+        Deadline,
+    }
+    pub const CASES: [Case; 15] = [
+        Case::Unchanged,
+        Case::ReplacedUia,
+        Case::RootChanged,
+        Case::AncestryUnknown,
+        Case::FocusReadFailed,
+        Case::CompareFailed,
+        Case::FocusChanged,
+        Case::ForegroundChanged,
+        Case::Win32FocusChanged,
+        Case::ImeWindowChanged,
+        Case::ImeOwnerChanged,
+        Case::LayoutChanged,
+        Case::IdentityUnknown,
+        Case::Intervention,
+        Case::Deadline,
+    ];
+
+    struct Fake {
+        case: Case,
+        checks: usize,
+        stop_at: Option<usize>,
+        roots: usize,
+        root_change_at: Option<usize>,
+        identities: usize,
+        identity_change_at: Option<usize>,
     }
     impl Fake {
-        /// 元の入力先が維持された応答を用意する。
-        pub fn new() -> Self {
+        /// 元のUIA要素IDは1、再生成後は2として観測を作る。
+        fn new(case: Case) -> Self {
             Self {
-                attrs: Attributes {
-                    edit: true,
-                    password: false,
-                    offscreen: false,
-                },
-                root_error: false,
-                ancestor_error: false,
-                read_error: false,
-                focus: true,
+                case,
                 checks: 0,
-                interrupt_at: None,
+                stop_at: None,
                 roots: 0,
-                change_root_at: None,
-                focuses: 0,
-                change_focus_at: None,
+                root_change_at: None,
+                identities: 0,
+                identity_change_at: None,
             }
         }
     }
     impl Probe for Fake {
-        /// 任意の区間での介入を再現する。
+        type Focus = u32;
+        /// 各境界の介入と期限を再現する。
         fn check(&mut self) -> Result<()> {
             self.checks += 1;
-            if self.interrupt_at == Some(self.checks) {
+            if self.stop_at == Some(self.checks) || matches!(self.case, Case::Intervention) {
                 Err("intervention")
+            } else if matches!(self.case, Case::Deadline) {
+                Err("deadline")
             } else {
                 Ok(())
             }
         }
-        /// 最後の確認でルートが変わる場合も再現する。
+        /// 後半でのルート差替えも検出する。
         fn root(&mut self) -> Result<()> {
             self.roots += 1;
-            if self.root_error || self.change_root_at == Some(self.roots) {
+            if matches!(self.case, Case::RootChanged) || self.root_change_at == Some(self.roots) {
                 Err("root_changed")
             } else {
                 Ok(())
             }
         }
-        /// 消失・所属不明は成功へ読み替えない。
-        fn ancestry(&mut self) -> Result<()> {
-            if self.ancestor_error {
+        /// 保存操作先の不一致と取得不能を区別する。
+        fn identity(&mut self) -> Result<()> {
+            self.identities += 1;
+            let mut values = [Some(true); 5];
+            let index = match self.case {
+                Case::ForegroundChanged => Some(0),
+                Case::Win32FocusChanged => Some(1),
+                Case::ImeWindowChanged => Some(2),
+                Case::ImeOwnerChanged => Some(3),
+                Case::LayoutChanged => Some(4),
+                _ => None,
+            };
+            if let Some(index) = index {
+                values[index] = Some(false);
+            }
+            if matches!(self.case, Case::IdentityUnknown) {
+                values[2] = None;
+            }
+            if self.identity_change_at == Some(self.identities) {
+                values[1] = Some(false);
+            }
+            check_identity(values)
+        }
+        /// 新規取得のフォーカスは旧要素と異なっていてもよい。
+        fn focus(&mut self) -> Result<u32> {
+            if matches!(self.case, Case::FocusReadFailed) {
+                Err("uia_error")
+            } else {
+                Ok(if matches!(self.case, Case::ReplacedUia) {
+                    2
+                } else {
+                    1
+                })
+            }
+        }
+        /// 現在フォーカスのルート所属不明は拒否する。
+        fn ancestry(&mut self, _: &u32) -> Result<()> {
+            if matches!(self.case, Case::AncestryUnknown) {
                 Err("ancestry_unknown")
             } else {
                 Ok(())
             }
         }
-        /// 属性取得失敗を再現する。
-        fn attributes(&mut self) -> Result<Attributes> {
-            if self.read_error {
+        /// 旧要素ではなく、この検証中に取得した要素との一致を返す。
+        fn same_focus(&mut self, focus: &u32) -> Result<bool> {
+            if matches!(self.case, Case::CompareFailed) {
                 Err("uia_error")
             } else {
-                Ok(self.attrs)
+                Ok(!matches!(self.case, Case::FocusChanged)
+                    && *focus
+                        == if matches!(self.case, Case::ReplacedUia) {
+                            2
+                        } else {
+                            1
+                        })
             }
         }
-        /// 同一HWND内でも別のUIA要素への移動を拒否する。
-        fn focused(&mut self) -> Result<bool> {
-            self.focuses += 1;
-            Ok(self.focus && self.change_focus_at != Some(self.focuses))
+    }
+
+    /// 復元だけは再生成を許容し、送信前の同一性検証は拒否を維持する。
+    #[test]
+    fn replaced_uia_is_allowed_only_for_restoration() {
+        assert!(validate_case(Case::ReplacedUia));
+        let mut send = crate::selection::tests::Fake::new(&[true]);
+        send.items[0].0 = 2;
+        assert_eq!(
+            crate::selection::revalidate(&mut send, false, &1),
+            Err("target_changed")
+        );
+        for changed in [1, 2, 3, 4, 5, 6, 7] {
+            assert!(!crate::selection::tests::revalidate_case(changed));
         }
     }
 
-    /// 送信前に拒否する属性変化でも、元要素の復元条件が保たれれば許可する。
+    /// 別操作先・未知・介入は同じHWNDに見えても許可しない。
     #[test]
-    fn enabled_focusable_and_candidate_count_are_send_only() {
-        for (enabled, focusable) in [(false, true), (true, false), (false, false)] {
-            assert!(!crate::policy::editable(
-                true, enabled, focusable, false, false
-            ));
-            assert_eq!(validate(&mut Fake::new()), Ok(()));
+    fn all_mismatches_and_failures_stop_restore() {
+        for case in CASES {
+            assert_eq!(
+                validate_case(case),
+                matches!(case, Case::Unchanged | Case::ReplacedUia),
+                "{case:?}"
+            );
         }
-        for documents in [&[][..], &[true, true][..]] {
-            let mut send = crate::selection::tests::Fake::new(documents);
-            assert!(crate::selection::revalidate(&mut send, false, &1).is_err());
-            assert_eq!(validate(&mut Fake::new()), Ok(()));
+        for index in 0..5 {
+            let mut values = [Some(true); 5];
+            values[index] = None;
+            assert_eq!(check_identity(values), Err("restore_identity_unknown"));
         }
-    }
-
-    /// 別要素・別ルート・取得失敗・非表示・型変更・passwordを拒否する。
-    #[test]
-    fn unknown_or_changed_input_target_stops_restore() {
-        for case in [1, 2, 5, 6, 8, 9, 10, 11] {
-            assert!(!validate_case(case));
-        }
-        let mut p = Fake::new();
-        p.change_root_at = Some(2);
+        let mut p = Fake::new(Case::Unchanged);
+        p.root_change_at = Some(2);
         assert_eq!(validate(&mut p), Err("root_changed"));
-        let mut p = Fake::new();
-        p.change_focus_at = Some(2);
-        assert_eq!(validate(&mut p), Err("restore_focus_changed"));
+        let mut p = Fake::new(Case::Unchanged);
+        p.identity_change_at = Some(2);
+        assert_eq!(validate(&mut p), Err("restore_win32_focus_changed"));
     }
 
-    /// 全ガード区間で介入すると復元検証を完了させない。
+    /// 全ガード区間での介入をラッチ解除や再試行で救済しない。
     #[test]
     fn intervention_at_every_boundary_stops_restore() {
-        let mut baseline = Fake::new();
+        let mut baseline = Fake::new(Case::Unchanged);
         assert_eq!(validate(&mut baseline), Ok(()));
         for at in 1..=baseline.checks {
-            let mut p = Fake::new();
-            p.interrupt_at = Some(at);
+            let mut p = Fake::new(Case::Unchanged);
+            p.stop_at = Some(at);
             assert_eq!(validate(&mut p), Err("intervention"));
         }
     }
 
-    /// Writerの試験を本番と同じ復元検証へ接続する。
-    pub fn validate_case(case: usize) -> bool {
-        let mut p = Fake::new();
-        match case {
-            1 | 5 => p.focus = false,
-            2 => p.attrs.offscreen = true,
-            6 => p.ancestor_error = true,
-            8 => p.root_error = true,
-            9 => p.read_error = true,
-            10 => p.attrs.password = true,
-            11 => p.attrs.edit = false,
-            _ => {} // 0=不変、3=Enabled変化、4=件数変化、7=Focusable変化。
-        }
-        validate(&mut p).is_ok()
+    /// WriterとIMEモデルも本番と同じ復元判定を使って試験する。
+    pub fn validate_case(case: Case) -> bool {
+        validate(&mut Fake::new(case)).is_ok()
     }
 }

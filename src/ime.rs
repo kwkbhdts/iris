@@ -453,7 +453,7 @@ pub fn expired(request: Request) -> bool {
     unsafe { GetTickCount() }.wrapping_sub(request.snapshot.at) > DEADLINE_MS
 }
 
-/// 診断専用に現在の入力先を読み、取得不能をNoneに保つ。書込みは行わない。
+/// 現在の入力先を読み、復元照合と診断に使う。取得不能はNoneに保つ。
 #[allow(dead_code)]
 pub fn read_identity() -> (
     Option<WindowId>,

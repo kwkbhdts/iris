@@ -360,7 +360,7 @@ impl Session {
                         self.validate_send(&target, &root, request, trace, outcome)
                     }
                     writer::ValidationStage::Restore => {
-                        self.validate_restore(&target, &root, request, trace, outcome)
+                        self.validate_restore(&root, request, trace, outcome, saved_identity)
                     }
                 };
                 match validation {

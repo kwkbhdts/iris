@@ -533,11 +533,11 @@ mod regression {
             }
         }
     }
-    /// 復元は元要素の同一性で判断し、新規送信の属性や件数だけでは拒否しない。
+    /// UIA再生成でも保存IME操作先が一致すれば一回復元し、不一致なら停止する。
     #[test]
-    fn restore_uses_saved_target_after_input() {
+    fn restore_uses_saved_ime_context_after_input() {
         for wheel in [Kind::MouseWheel, Kind::MouseHorizontalWheel] {
-            for changed in 0..=11 {
+            for changed in crate::restore::tests::CASES {
                 let events = Events::EMPTY;
                 let start = record(&events, Kind::NewShortcut, Truth::False);
                 let focus = Cell::new(true);
@@ -575,7 +575,11 @@ mod regression {
                     evidence: Evidence::UNKNOWN,
                 };
                 let result = model::run(&mut writer);
-                if matches!(changed, 0 | 3 | 4 | 7) {
+                if matches!(
+                    changed,
+                    crate::restore::tests::Case::Unchanged
+                        | crate::restore::tests::Case::ReplacedUia
+                ) {
                     assert!(!result.manual);
                     assert_eq!(writer.inner.calls, ["off", "input", "on"]);
                     assert_eq!(result.diagnostic(), "IRIS-I000");

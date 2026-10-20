@@ -65,8 +65,14 @@ impl selection::Probe for Candidates<'_> {
 
     /// 診断と同じ有界祖先探索を使い、unknownをfalseに変えない。
     fn ancestry(&mut self, element: &Self::Element) -> Result<bool> {
-        self.session
-            .ancestor_document(element, self.root, self.request, self.trace, self.outcome)
+        self.session.ancestor_path(
+            element,
+            self.root,
+            self.request,
+            self.trace,
+            self.outcome,
+            selection::requires_document(self.request.context.app),
+        )
     }
 
     /// 再探索で元の候補と同じ要素であることを確認する。
@@ -95,6 +101,7 @@ struct Ancestors<'a> {
     request: Request,
     trace: &'a mut Trace,
     outcome: &'a mut Outcome,
+    check_document: bool,
 }
 impl Tree for Ancestors<'_> {
     type Node = IUIAutomationElement;
@@ -116,9 +123,9 @@ impl Tree for Ancestors<'_> {
         .map(|v| v.as_bool())
     }
 
-    /// デスクトップではDocumentを条件にも追加照会にも使わない。
+    /// 送信時のブラウザーだけDocumentを照会し、復元では使わない。
     fn is_document(&mut self, node: &Self::Node) -> Result<bool> {
-        if !selection::requires_document(self.request.context.app) {
+        if !self.check_document {
             return Ok(false);
         }
         call!(
@@ -154,14 +161,15 @@ impl Tree for Ancestors<'_> {
 }
 
 impl Session {
-    /// 保存済み要素の祖先を、送信選択と復元検証で同じ条件で確認する。
-    pub(super) fn ancestor_document(
+    /// 元ルートへの有界探索を共用し、Document照会は呼出し側で選ぶ。
+    pub(super) fn ancestor_path(
         &self,
         element: &IUIAutomationElement,
         root: &IUIAutomationElement,
         request: Request,
         trace: &mut Trace,
         outcome: &mut Outcome,
+        check_document: bool,
     ) -> Result<bool> {
         let observed = ancestry::inspect(
             &mut Ancestors {
@@ -170,6 +178,7 @@ impl Session {
                 request,
                 trace,
                 outcome,
+                check_document,
             },
             element.clone(),
         );
@@ -178,7 +187,7 @@ impl Session {
             observed.root_reached,
             observed.complete,
             match observed.document {
-                Some(_) if !selection::requires_document(request.context.app) => "not_checked",
+                Some(_) if !check_document => "not_checked",
                 Some(true) => "true",
                 Some(false) => "false",
                 None => "unknown",
@@ -249,7 +258,7 @@ impl Session {
         ))
     }
 
-    /// SetFocus後と入力直前に、実フォーカスが選択対象と一致するか読む。
+    /// 実フォーカスが比較対象と一致するか読み、検証中の変化も検出する。
     pub(super) fn observe(
         &self,
         target: &IUIAutomationElement,
